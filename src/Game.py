@@ -99,7 +99,7 @@ WINNING_LINES_BY_CELL = _build_winning_lines_by_cell()
 class Game:
     """
     Class representing a game of "Score Four", a kind of 3D "Connect Four" with a grid of 4x4x4.
-    Beads necessarily fall to the lowest available position in the column, and the first player to get align four of their beads in a row (horizontally, vertically, or diagonally) wins the game.
+    Beads necessarily fall to the lowest available position in the column, and the first player to align four of their beads in a row (horizontally, vertically, or diagonally) wins the game.
     """
 
     def __init__(self):
