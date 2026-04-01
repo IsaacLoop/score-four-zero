@@ -1,3 +1,6 @@
+import numpy as np
+import torch
+
 from .Env import Env
 
 
@@ -80,19 +83,21 @@ class MCTS:
     def _expand_node(self, node: Node, env: Env) -> float:
         x = env.canonical_state(perspective_player=node.player_to_play)
         policy_logits, value = self.model.forward(x)
-        legal_actions_mask = env.legal_actions_mask()
-
-        masked_logits = [
-            logit if mask else float("-inf")
-            for logit, mask in zip(policy_logits, legal_actions_mask)
-        ]
-        priors = softmax(masked_logits)
+        policy_logits = policy_logits.reshape(-1)
+        legal_actions_mask = torch.as_tensor(
+            env.legal_actions_mask(),
+            dtype=torch.bool,
+            device=policy_logits.device,
+        )
+        masked_logits = policy_logits.masked_fill(~legal_actions_mask, float("-inf"))
+        priors = torch.softmax(masked_logits, dim=0)
 
         for a, prior in enumerate(priors):
-            if legal_actions_mask[a]:
+            if legal_actions_mask[a].item():
                 node.children[a] = Node(
-                    prior=priors[a], player_to_play=-node.player_to_play
+                    prior=float(prior.item()),
+                    player_to_play=-node.player_to_play,
                 )
 
         node.is_expanded = True
-        return value
+        return float(value.item())

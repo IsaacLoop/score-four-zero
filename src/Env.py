@@ -19,14 +19,10 @@ class Env:
 
     def legal_actions_mask(self):
         """
-        1 if the action is legal, 0 otherwise.
+        Boolean mask with one entry per action.
         """
-        mask = [0] * (BOARD_SIZE * BOARD_SIZE)
-        for x in range(BOARD_SIZE):
-            for y in range(BOARD_SIZE):
-                if self.game.column_heights[x][y] < BOARD_SIZE:
-                    mask[x * BOARD_SIZE + y] = 1
-        return mask
+        column_heights = np.asarray(self.game.column_heights)
+        return (column_heights < BOARD_SIZE).reshape(-1)
 
     def is_terminal(self):
         return self.game.game_state != GameState.IN_PROGRESS
@@ -39,7 +35,7 @@ class Env:
             return 1
         else:
             return 0
-        
+
     def terminal_value(self, perspective_player):
         winner = self.winner()
         if winner == 0:
@@ -62,9 +58,9 @@ class Env:
         Plane 0: current player's beads
         Plane 1: opponent's beads
         """
-        player_1_state = np.array(self.game.board) == -1
-        player_2_state = np.array(self.game.board) == 1
-        if perspective_player == -1:
-            return np.stack([player_1_state, player_2_state], axis=0).astype(int)
-        else:
-            return np.stack([player_2_state, player_1_state], axis=0).astype(int)
+        board = np.asarray(self.game.board, dtype=np.int8)
+        current_player_state = board == perspective_player
+        opponent_state = board == -perspective_player
+        return np.stack([current_player_state, opponent_state], axis=0).astype(
+            np.float32
+        )
