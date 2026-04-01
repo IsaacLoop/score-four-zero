@@ -1,17 +1,23 @@
+"""
+X: Horizontal
+Y: Perpendicular horizontal
+Z: Vertical
+"""
+
 from enum import IntEnum
 
 BOARD_SIZE = 4
-TOTAL_CELLS = BOARD_SIZE**3
+TOTAL_CELLS = BOARD_SIZE * BOARD_SIZE * BOARD_SIZE
 EMPTY_CELL = 0
-PLAYER_1 = 1
-PLAYER_2 = 2
+PLAYER_1 = -1
+PLAYER_2 = 1
 
 
 class GameState(IntEnum):
-    IN_PROGRESS = 0
+    IN_PROGRESS = 2
     PLAYER_1_WINS = PLAYER_1
     PLAYER_2_WINS = PLAYER_2
-    DRAW = 3
+    DRAW = 0
 
 
 def _build_masks():
@@ -36,30 +42,37 @@ def _build_masks():
             )
         )
 
+    # horizontal lines
     for y in range(BOARD_SIZE):
         for z in range(BOARD_SIZE):
             add_mask([(x, y, z) for x in range(BOARD_SIZE)])
 
+    # horizontal lines perpendicular
     for x in range(BOARD_SIZE):
         for z in range(BOARD_SIZE):
             add_mask([(x, y, z) for y in range(BOARD_SIZE)])
 
+    # vertical lines
     for x in range(BOARD_SIZE):
         for y in range(BOARD_SIZE):
             add_mask([(x, y, z) for z in range(BOARD_SIZE)])
 
+    # horizontal center diagonals
     for z in range(BOARD_SIZE):
         add_mask([(i, i, z) for i in range(BOARD_SIZE)])
         add_mask([(i, BOARD_SIZE - 1 - i, z) for i in range(BOARD_SIZE)])
 
+    # vertical center diagonals
     for y in range(BOARD_SIZE):
         add_mask([(i, y, i) for i in range(BOARD_SIZE)])
         add_mask([(i, y, BOARD_SIZE - 1 - i) for i in range(BOARD_SIZE)])
 
+    # vertical center diagonals perpendicular
     for x in range(BOARD_SIZE):
         add_mask([(x, i, i) for i in range(BOARD_SIZE)])
         add_mask([(x, i, BOARD_SIZE - 1 - i) for i in range(BOARD_SIZE)])
 
+    # diagonal diagonals
     add_mask([(i, i, i) for i in range(BOARD_SIZE)])
     add_mask([(i, i, BOARD_SIZE - 1 - i) for i in range(BOARD_SIZE)])
     add_mask([(i, BOARD_SIZE - 1 - i, i) for i in range(BOARD_SIZE)])
@@ -112,7 +125,7 @@ class Game:
             [0 for _ in range(BOARD_SIZE)] for _ in range(BOARD_SIZE)
         ]
         self.current_player = PLAYER_1
-        self.state = GameState.IN_PROGRESS
+        self.game_state = GameState.IN_PROGRESS
         self.move_count = 0
 
     def make_move(self, x: int, y: int) -> bool:
@@ -123,7 +136,7 @@ class Game:
         """
         if not (0 <= x < BOARD_SIZE and 0 <= y < BOARD_SIZE):
             raise ValueError("Coordinates must be between 0 and 3 inclusive.")
-        if self.state != GameState.IN_PROGRESS:
+        if self.game_state != GameState.IN_PROGRESS:
             return False
 
         z = self.column_heights[x][y]
@@ -136,7 +149,7 @@ class Game:
         self.move_count += 1
         self.update_state(x, y, z, player)
 
-        if self.state == GameState.IN_PROGRESS:
+        if self.game_state == GameState.IN_PROGRESS:
             self.current_player = PLAYER_2 if player == PLAYER_1 else PLAYER_1
 
         return True
@@ -152,20 +165,20 @@ class Game:
 
         for line in WINNING_LINES_BY_CELL[(x, y, z)]:
             if all(self.board[cx][cy][cz] == player for cx, cy, cz in line):
-                self.state = (
+                self.game_state = (
                     GameState.PLAYER_1_WINS
                     if player == PLAYER_1
                     else GameState.PLAYER_2_WINS
                 )
-                return self.state
+                return self.game_state
 
-        self.state = (
+        self.game_state = (
             GameState.DRAW if self.move_count == TOTAL_CELLS else GameState.IN_PROGRESS
         )
-        return self.state
+        return self.game_state
 
-    def check_state(self) -> GameState:
+    def get_game_state(self) -> GameState:
         """
         Return the current game state.
         """
-        return self.state
+        return self.game_state
