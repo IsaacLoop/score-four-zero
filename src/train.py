@@ -148,7 +148,7 @@ def train():
     WEIGHT_DECAY = 1e-4
     MAX_GRAD_NORM = 1.0
     NUM_SAMPLING_MOVES = 8
-    SELF_PLAY_WORKERS = min(12, GAMES_PER_ITERATION, os.cpu_count() or 1)
+    SELF_PLAY_WORKERS = min(24, GAMES_PER_ITERATION, os.cpu_count() or 1)
 
     CHECKPOINT_DIR = Path("checkpoints")
     CHECKPOINT_DIR.mkdir(exist_ok=True)
