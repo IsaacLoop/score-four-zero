@@ -85,11 +85,20 @@ def train():
         dirichlet_epsilon=DIRICHLET_EPSILON,
     )
 
-    for _ in range(NUM_ITERATIONS):
+    for _ in tqdm(
+        range(NUM_ITERATIONS),
+        desc="Iterations",
+        position=0,
+    ):
 
         # 1 - Self-play
         model.eval()
-        for _ in range(GAMES_PER_ITERATION):
+        for _ in tqdm(
+            range(GAMES_PER_ITERATION),
+            desc="Self-play",
+            position=1,
+            leave=False,
+        ):
             env = Env()
             examples = play_one_self_play_game(
                 env=env,
@@ -102,7 +111,12 @@ def train():
 
         # 2 - Training
         model.train()
-        for _ in range(TRAIN_STEPS_PER_ITERATION):
+        for _ in tqdm(
+            range(TRAIN_STEPS_PER_ITERATION),
+            desc="Training",
+            position=2,
+            leave=False,
+        ):
             x_batch, pi_batch, z_batch = replay_buffer.sample_batch(BATCH_SIZE)
 
             x_batch = torch.as_tensor(x_batch, dtype=torch.float32, device=device)
@@ -124,9 +138,11 @@ def train():
             # 1) if the target (pi) says an action is important,
             # 2) and the model gives it a small probability (softmax of logits),
             # 3) then punish this hard by turning the model probability into a big negative number (-log)
-            policy_loss = -(
-                pi_batch * torch.log_softmax(policy_logits_batch, dim=-1)
-            ).sum(dim=-1).mean()
+            policy_loss = (
+                -(pi_batch * torch.log_softmax(policy_logits_batch, dim=-1))
+                .sum(dim=-1)
+                .mean()
+            )
 
             value_loss = mse_loss(value_batch.squeeze(-1), z_batch)
 
@@ -135,6 +151,7 @@ def train():
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
             optimizer.step()
+
 
 if __name__ == "__main__":
     train()
