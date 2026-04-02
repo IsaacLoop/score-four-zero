@@ -28,7 +28,7 @@ class MCTS:
         self,
         model,
         num_simulations: int,
-        c_puct: float,
+        c_puct: float,  # "Prior - Upper Confidence bound applied to Trees"
         add_exploration_noise: bool = False,
         dirichlet_alpha: float = None,
         dirichlet_epsilon: float = None,
@@ -80,9 +80,12 @@ class MCTS:
             # 3 - Backpropagation (not ML backpropagation!!)
             self._backpropagate(path, value)
 
+        return root
+
     def _expand_node(self, node: Node, env: Env) -> float:
         x = env.canonical_state(perspective_player=node.player_to_play)
-        policy_logits, value = self.model.forward(x)
+        with torch.no_grad():
+            policy_logits, value = self.model.forward(x)
         policy_logits = policy_logits.reshape(-1)
         legal_actions_mask = torch.as_tensor(
             env.legal_actions_mask(),
@@ -101,3 +104,67 @@ class MCTS:
 
         node.is_expanded = True
         return float(value.item())
+
+    def _add_exploration_noise(self, root: Node):
+        if len(root.children) == 0:
+            return
+
+        noise = np.random.dirichlet([self.dirichlet_alpha] * len(root.children))
+
+        for child, noise_value in zip(root.children.values(), noise):
+            child.prior = (
+                1 - self.dirichlet_epsilon
+            ) * child.prior + self.dirichlet_epsilon * float(noise_value)
+
+    def _select_child(self, node: Node):
+        """
+        Choose action maximizing Q + U
+
+        Q is the value of a child
+        U is the exploration bonus based on prior and visit counter
+        """
+        best_score = float("-inf")
+        best_action = None
+        best_child = None
+
+        parent_visits_sqrt = np.sqrt(node.visit_count + 1)
+
+        for action, child in node.children.items():
+            q = (
+                -child.value()
+            )  # minus because next move is from the PoV of the opponent
+
+            u = self.c_puct * child.prior * parent_visits_sqrt / (1 + child.visit_count)
+
+            score = q + u
+
+            if score > best_score:
+                best_score = score
+                best_action = action
+                best_child = child
+
+        return best_action, best_child
+
+    def _backpropagate(self, path: list[Node], value: float):
+        for node in path[::-1]:
+            node.value_sum += value
+            node.visit_count += 1
+            value = -value
+
+    def visit_counts_to_policy(self, root: Node, temperature: float):
+        """
+        Higher temperature means more exploration. 0 means greedy.
+        """
+        visits = np.zeros(16)
+
+        for action, child in root.children.items():
+            visits[action] = child.visit_count
+
+        if temperature == 0:
+            pi = np.zeros(16)
+            best_action = np.argmax(visits)
+            pi[best_action] = 1.0
+            return pi
+        
+        pi = visits ** (1 / temperature)
+        return pi / np.sum(pi)
