@@ -3,6 +3,7 @@ import torch
 from torch.nn.functional import mse_loss
 from torch.optim import AdamW
 from tqdm import tqdm
+from pathlib import Path
 
 from .Env import Env
 from .MCTS import MCTS
@@ -65,6 +66,10 @@ def train():
     WEIGHT_DECAY = 1e-4
     MAX_GRAD_NORM = 1.0
 
+    CHECKPOINT_DIR = Path("checkpoints")
+    CHECKPOINT_DIR.mkdir(exist_ok=True)
+
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device} " + ("🥰" if device.type == "cuda" else "😢"))
 
@@ -85,7 +90,7 @@ def train():
         dirichlet_epsilon=DIRICHLET_EPSILON,
     )
 
-    for _ in tqdm(
+    for iteration in tqdm(
         range(NUM_ITERATIONS),
         desc="Iterations",
         position=0,
@@ -151,6 +156,16 @@ def train():
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
             optimizer.step()
+
+        # Final - Saving
+        checkpoint_path = CHECKPOINT_DIR / f"iteration_{iteration + 1:04d}.pt"
+        torch.save(
+            {
+                "iteration": iteration + 1,
+                "model_state_dict": model.state_dict(),
+            },
+            checkpoint_path,
+        )
 
 
 if __name__ == "__main__":
