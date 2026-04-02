@@ -2,6 +2,7 @@ import numpy as np
 import torch
 
 from .Env import Env
+from .Game import BOARD_SIZE
 
 
 class Node:
@@ -34,6 +35,7 @@ class MCTS:
         dirichlet_epsilon: float = None,
     ):
         self.model = model
+        self.device = next(model.parameters()).device
         self.num_simulations = num_simulations
         self.c_puct = c_puct
         self.add_exploration_noise = add_exploration_noise
@@ -83,10 +85,14 @@ class MCTS:
         return root
 
     def _expand_node(self, node: Node, env: Env) -> float:
-        x = env.canonical_state(perspective_player=node.player_to_play)
+        x = torch.as_tensor(
+            env.canonical_state(perspective_player=node.player_to_play),
+            dtype=torch.float32,
+            device=self.device,
+        ).unsqueeze(0)
         with torch.no_grad():
-            policy_logits, value = self.model.forward(x)
-        policy_logits = policy_logits.reshape(-1)
+            policy_logits, value = self.model(x)
+        policy_logits = policy_logits.squeeze(0)
         legal_actions_mask = torch.as_tensor(
             env.legal_actions_mask(),
             dtype=torch.bool,
@@ -103,7 +109,7 @@ class MCTS:
                 )
 
         node.is_expanded = True
-        return float(value.item())
+        return float(value.squeeze(0).item())
 
     def _add_exploration_noise(self, root: Node):
         if len(root.children) == 0:
@@ -155,16 +161,29 @@ class MCTS:
         """
         Higher temperature means more exploration. 0 means greedy.
         """
-        visits = np.zeros(16)
+        visits = np.zeros(BOARD_SIZE**2, dtype=np.float32)
 
         for action, child in root.children.items():
             visits[action] = child.visit_count
 
-        if temperature == 0:
-            pi = np.zeros(16)
-            best_action = np.argmax(visits)
+        if temperature == 0.0:
+            pi = np.zeros(BOARD_SIZE**2, dtype=np.float32)
+            if root.children:
+                best_action = max(
+                    root.children.items(),
+                    key=lambda item: item[1].visit_count,
+                )[0]
+            else:
+                best_action = int(np.argmax(visits))
             pi[best_action] = 1.0
             return pi
-        
+
         pi = visits ** (1 / temperature)
-        return pi / np.sum(pi)
+        visit_total = np.sum(pi)
+        if visit_total == 0:
+            pi = np.zeros(BOARD_SIZE**2, dtype=np.float32)
+            if root.children:
+                legal_actions = list(root.children)
+                pi[legal_actions] = 1.0 / len(legal_actions)
+            return pi
+        return pi / visit_total

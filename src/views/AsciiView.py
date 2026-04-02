@@ -29,22 +29,15 @@ class AsciiView(GameView):
         else:
             game_state = "Draw"
 
-        print(
-            "z=   "
-            + "   ".join(f"{z:<7}" for z in range(BOARD_SIZE))
-        )
-        print(
-            "x=   "
-            + "   ".join("0 1 2 3" for _ in range(BOARD_SIZE))
-        )
+        print("z=   " + "   ".join(f"{z:<7}" for z in range(BOARD_SIZE)))
+        print("x=   " + "   ".join("0 1 2 3" for _ in range(BOARD_SIZE)))
 
         for y in range(BOARD_SIZE - 1, -1, -1):
             row = []
             for z in range(BOARD_SIZE):
                 row.append(
                     " ".join(
-                        symbols[self.game.board[x][y][z]]
-                        for x in range(BOARD_SIZE)
+                        symbols[self.game.board[x][y][z]] for x in range(BOARD_SIZE)
                     )
                 )
             print(f"y={y}  " + "   ".join(row))
