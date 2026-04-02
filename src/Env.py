@@ -1,4 +1,3 @@
-from copy import deepcopy
 import numpy as np
 
 from .Game import BOARD_SIZE, Game, GameState
@@ -49,8 +48,19 @@ class Env:
         return self.game.current_player
 
     def clone(self):
-        new_env = Env()
-        new_env.game = deepcopy(self.game)
+        new_env = Env.__new__(Env)
+        new_game = Game.__new__(Game)
+
+        new_game.board = [
+            [column[:] for column in plane]
+            for plane in self.game.board
+        ]
+        new_game.column_heights = [row[:] for row in self.game.column_heights]
+        new_game.current_player = self.game.current_player
+        new_game.game_state = self.game.game_state
+        new_game.move_count = self.game.move_count
+
+        new_env.game = new_game
         return new_env
 
     def canonical_state(self, perspective_player):
