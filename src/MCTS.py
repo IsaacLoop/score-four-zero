@@ -90,7 +90,7 @@ class MCTS:
             dtype=torch.float32,
             device=self.device,
         ).unsqueeze(0)
-        with torch.no_grad():
+        with torch.inference_mode():
             policy_logits, value = self.model(x)
         policy_logits = policy_logits.squeeze(0)
         legal_actions_mask = torch.as_tensor(
