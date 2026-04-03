@@ -8,7 +8,7 @@ class AsciiView(GameView):
     def __init__(self, game):
         super().__init__(game)
 
-    def update(self):
+    def update(self, minimal: bool = False):
         symbols = {
             EMPTY_CELL: ".",
             PLAYER_1: "X",
@@ -41,7 +41,13 @@ class AsciiView(GameView):
                 )
             print(f"y={y}  " + "   ".join(row))
 
-        print("x=   " + "   ".join(" ".join(str(x) for x in range(BOARD_SIZE)) for _ in range(BOARD_SIZE)))
-        print()
-        print(f"Player's turn: {player_turn}")
-        print(f"Game state: {game_state}")
+        print(
+            "x=   "
+            + "   ".join(
+                " ".join(str(x) for x in range(BOARD_SIZE)) for _ in range(BOARD_SIZE)
+            )
+        )
+        if not minimal:
+            print()
+            print(f"Player's turn: {player_turn}")
+            print(f"Game state: {game_state}")
