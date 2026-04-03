@@ -30,7 +30,6 @@ class AsciiView(GameView):
             game_state = "Draw"
 
         print("z=   " + "   ".join(f"{z:<7}" for z in range(BOARD_SIZE)))
-        print("x=   " + "   ".join("0 1 2 3" for _ in range(BOARD_SIZE)))
 
         for y in range(BOARD_SIZE - 1, -1, -1):
             row = []
@@ -42,6 +41,7 @@ class AsciiView(GameView):
                 )
             print(f"y={y}  " + "   ".join(row))
 
+        print("x=   " + "   ".join(" ".join(str(x) for x in range(BOARD_SIZE)) for _ in range(BOARD_SIZE)))
         print()
         print(f"Player's turn: {player_turn}")
         print(f"Game state: {game_state}")

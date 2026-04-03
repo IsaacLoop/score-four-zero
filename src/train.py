@@ -6,6 +6,7 @@ from torch.nn.functional import mse_loss
 from torch.optim import AdamW
 from tqdm import tqdm
 
+from .elo_history import append_elo_snapshot, reset_elo_history
 from .elo_parallel import ParallelEloPool
 from .PolicyValueModel import PolicyValueModel
 from .ReplayBuffer import ReplayBuffer
@@ -35,8 +36,13 @@ def train():
     ELO_EVALUATION_WORKER_MAX_TASKS = 100
     NUM_SIMULATIONS_EVALUATION = 25
 
+    ARTIFACTS_DIR = Path("artifacts")
     CHECKPOINT_DIR = Path("checkpoints")
+    ELO_HISTORY_PATH = ARTIFACTS_DIR / "elo_history.jsonl"
+
+    ARTIFACTS_DIR.mkdir(exist_ok=True)
     CHECKPOINT_DIR.mkdir(exist_ok=True)
+    reset_elo_history(ELO_HISTORY_PATH)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device} " + ("🥰" if device.type == "cuda" else "😢"))
@@ -165,6 +171,13 @@ def train():
                 position=4,
                 leave=False,
             )
+
+        append_elo_snapshot(
+            ELO_HISTORY_PATH,
+            iteration=iteration + 1,
+            model_paths=model_paths,
+            elos=elos,
+        )
 
     self_play_pool.close()
     elo_evaluation_pool.close()

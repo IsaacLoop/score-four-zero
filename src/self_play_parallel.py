@@ -1,5 +1,5 @@
 """
-Parallel self-play helpers used by the training loop.
+Parallel self-play helpers used by the training loop. Parallelization aspects kinda vibe-coded.
 """
 
 from concurrent.futures import ProcessPoolExecutor, as_completed
