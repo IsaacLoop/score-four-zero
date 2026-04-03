@@ -6,6 +6,7 @@ from torch.nn.functional import mse_loss
 from torch.optim import AdamW
 from tqdm import tqdm
 
+from .elo_parallel import ParallelEloPool
 from .PolicyValueModel import PolicyValueModel
 from .ReplayBuffer import ReplayBuffer
 from .self_play_parallel import ParallelSelfPlayPool
@@ -29,6 +30,8 @@ def train():
     N_PARALLEL_WORKERS = min(24, GAMES_PER_ITERATION, os.cpu_count() or 1)
     SELF_PLAY_WORKER_MAX_TASKS = 100
 
+    STARTING_ELO = 500.0
+    NUM_EVALUATION_FIGHTS = 100
     ELO_EVALUATION_WORKER_MAX_TASKS = 100
     NUM_SIMULATIONS_EVALUATION = 25
 
@@ -55,14 +58,15 @@ def train():
     )
     self_play_pool.open()
 
-    elo_evaluation_pool = ParallelSelfPlayPool(
-        max_workers=N_PARALLEL_WORKERS,
+    elo_evaluation_pool = ParallelEloPool(
         num_simulations=NUM_SIMULATIONS_EVALUATION,
+        max_workers=N_PARALLEL_WORKERS,
         c_puct=C_PUCT,
         max_tasks_per_child=ELO_EVALUATION_WORKER_MAX_TASKS,
     )
+    elo_evaluation_pool.open()
     elos = []
-    models = []
+    model_paths = []
 
     for iteration in tqdm(
         range(NUM_ITERATIONS),
@@ -131,12 +135,6 @@ def train():
             optimizer.step()
 
         # 3 - Evaluating
-        #elos.append(STARTING_ELO)
-        #models.append(<copy of the model, in CPU, but like actually usable, can do forward passes and stuff>)
-        #elos = elo_evaluation_pool.evaluate(elos, models, NUM_EVALUATION_FIGHTS//2, always_last=True)
-        #elos = elo_evaluation_pool.evaluate(elos, models, NUM_EVALUATION_FIGHTS//2, always_last=False)
-
-        # Final - Saving
         checkpoint_path = CHECKPOINT_DIR / f"iteration_{iteration + 1:04d}.pt"
         torch.save(
             {
@@ -145,8 +143,31 @@ def train():
             },
             checkpoint_path,
         )
+        model_paths.append(checkpoint_path)
+        elos.append(STARTING_ELO)
+
+        if len(model_paths) >= 2:
+            elos = elo_evaluation_pool.evaluate(
+                elos,
+                model_paths,
+                NUM_EVALUATION_FIGHTS // 2,
+                always_last=True,
+                desc="Eval latest",
+                position=3,
+                leave=False,
+            )
+            elos = elo_evaluation_pool.evaluate(
+                elos,
+                model_paths,
+                NUM_EVALUATION_FIGHTS // 2,
+                always_last=False,
+                desc="Eval pool",
+                position=4,
+                leave=False,
+            )
 
     self_play_pool.close()
+    elo_evaluation_pool.close()
 
 
 if __name__ == "__main__":
