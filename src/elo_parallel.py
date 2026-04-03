@@ -94,6 +94,13 @@ def compute_new_elos(elo1, elo2, result, k=20.0):
     return new_elo1, new_elo2
 
 
+def remap_fight_result(result, swapped: bool):
+    if not swapped or result == 0:
+        return result
+
+    return -result
+
+
 def sample_matchup(
     elos,
     distance_scale: float = 200.0,
@@ -269,28 +276,32 @@ class ParallelEloPool:
             while fights_remaining > 0:
                 batch_size = min(self.max_workers, fights_remaining)
                 matchup_indices = []
+                swapped_flags = []
 
                 for _ in range(batch_size):
-                    matchup_indices.append(
-                        sample_matchup(
-                            updated_elos,
-                            distance_scale=self.matchmaking_distance_scale,
-                            min_weight=self.matchmaking_min_weight,
-                            forced_idx1=(len(updated_elos) - 1) if always_last else None,
-                        )
+                    idx1, idx2 = sample_matchup(
+                        updated_elos,
+                        distance_scale=self.matchmaking_distance_scale,
+                        min_weight=self.matchmaking_min_weight,
+                        forced_idx1=(len(updated_elos) - 1) if always_last else None,
                     )
+                    matchup_indices.append((idx1, idx2))
+                    swapped_flags.append(bool(always_last and np.random.rand() < 0.5))
 
-                path_matchups = [
-                    (model_paths[idx1], model_paths[idx2])
-                    for idx1, idx2 in matchup_indices
-                ]
+                path_matchups = []
+                for (idx1, idx2), swapped in zip(matchup_indices, swapped_flags):
+                    if swapped:
+                        path_matchups.append((model_paths[idx2], model_paths[idx1]))
+                    else:
+                        path_matchups.append((model_paths[idx1], model_paths[idx2]))
                 results = self.fight_pool.fight_path_results(path_matchups, desc=None)
 
-                for (idx1, idx2), result in zip(matchup_indices, results):
+                for (idx1, idx2), swapped, result in zip(matchup_indices, swapped_flags, results):
+                    remapped_result = remap_fight_result(result, swapped)
                     updated_elos[idx1], updated_elos[idx2] = compute_new_elos(
                         updated_elos[idx1],
                         updated_elos[idx2],
-                        result,
+                        remapped_result,
                         k=self.elo_k,
                     )
 
