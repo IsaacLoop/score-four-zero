@@ -6,6 +6,46 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Score Four Zero Live Elo Tracker</title>
   <style>
+    :root {
+      --bg: #f4f4f4;
+      --panel-bg: #ffffff;
+      --panel-subtle-bg: #fafafa;
+      --border: #d0d0d0;
+      --text: #222222;
+      --muted: #666666;
+      --control-text: #444444;
+      --chart-grid: #dddddd;
+      --chart-axis: #222222;
+      --chart-bg: #ffffff;
+      --chart-line: #1f77b4;
+      --chart-best: #d62728;
+      --chart-latest: #2ca02c;
+      --chart-muted: #8f8f8f;
+      --chart-average: #0f766e;
+      --tooltip-bg: rgba(34, 34, 34, 0.95);
+      --tooltip-text: #ffffff;
+    }
+
+    body[data-theme="dark"] {
+      --bg: #12161c;
+      --panel-bg: #1a2028;
+      --panel-subtle-bg: #202734;
+      --border: #313a47;
+      --text: #e7edf6;
+      --muted: #9aa7b5;
+      --control-text: #d9e2ec;
+      --chart-grid: #2f3945;
+      --chart-axis: #cfd8e3;
+      --chart-bg: #141922;
+      --chart-line: #68a9ff;
+      --chart-best: #ff6b6b;
+      --chart-latest: #56d88b;
+      --chart-muted: #748194;
+      --chart-average: #43c4b7;
+      --tooltip-bg: rgba(8, 11, 16, 0.94);
+      --tooltip-text: #f5f7fa;
+    }
+
     * {
       box-sizing: border-box;
     }
@@ -13,8 +53,8 @@
     body {
       margin: 0;
       font-family: Arial, sans-serif;
-      background: #f4f4f4;
-      color: #222;
+      background: var(--bg);
+      color: var(--text);
       overflow: hidden;
     }
 
@@ -30,13 +70,13 @@
     }
 
     .panel {
-      background: #fff;
-      border: 1px solid #d0d0d0;
+      background: var(--panel-bg);
+      border: 1px solid var(--border);
       padding: 16px;
     }
 
     .muted {
-      color: #666;
+      color: var(--muted);
     }
 
     .layout {
@@ -71,6 +111,14 @@
       flex-wrap: wrap;
     }
 
+    .timeline-actions {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
     input[type="range"] {
       width: 100%;
     }
@@ -86,27 +134,76 @@
     }
 
     .stat {
-      border: 1px solid #d0d0d0;
+      border: 1px solid var(--border);
       padding: 12px;
-      background: #fafafa;
+      background: var(--panel-subtle-bg);
+      display: grid;
+      gap: 10px;
+      align-content: start;
     }
 
     .stat-label {
-      font-size: 13px;
-      color: #666;
-      margin-bottom: 6px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin: 0;
     }
 
     .stat-value {
       font-size: 22px;
       font-weight: 700;
+      line-height: 1.1;
+      color: var(--text);
+    }
+
+    .stat-body {
+      display: grid;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .stat-subvalue {
+      font-size: 14px;
+      font-weight: 600;
+      line-height: 1.35;
+      color: var(--text);
     }
 
     .stat-note {
-      margin-top: 6px;
+      margin: 0;
       font-size: 12px;
-      color: #666;
-      line-height: 1.4;
+      color: var(--muted);
+      line-height: 1.45;
+    }
+
+    .stat-table {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      column-gap: 12px;
+      row-gap: 7px;
+      align-items: baseline;
+    }
+
+    .stat-table-label {
+      font-size: 13px;
+      color: var(--muted);
+      line-height: 1.35;
+    }
+
+    .stat-table-value {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text);
+      line-height: 1.35;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .stat-controls {
+      padding-top: 10px;
+      border-top: 1px solid var(--border);
     }
 
     .control-stack {
@@ -118,7 +215,7 @@
       display: flex;
       align-items: center;
       gap: 8px;
-      color: #444;
+      color: var(--control-text);
       font-size: 14px;
     }
 
@@ -126,16 +223,111 @@
       display: flex;
       justify-content: space-between;
       gap: 12px;
-      color: #666;
+      color: var(--muted);
       font-size: 13px;
+    }
+
+    .tracked-meta {
+      display: grid;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .tracked-meta-line {
+      font-size: 13px;
+      color: var(--text);
+      line-height: 1.35;
+    }
+
+    .stat-detail-line {
+      font-size: 13px;
+      color: var(--text);
+      line-height: 1.35;
+    }
+
+    .tracked-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+    }
+
+    .stat-button {
+      padding: 7px 10px;
+      border: 1px solid var(--border);
+      background: var(--panel-bg);
+      color: var(--text);
+      border-radius: 6px;
+      font-size: 13px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .stat-button:hover {
+      filter: brightness(0.98);
+    }
+
+    .theme-toggle-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      cursor: pointer;
+    }
+
+    .theme-toggle-emoji {
+      font-size: 18px;
+      line-height: 1;
+      user-select: none;
+    }
+
+    .theme-toggle-checkbox {
+      appearance: none;
+      -webkit-appearance: none;
+      width: 42px;
+      height: 24px;
+      margin: 0;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--border);
+      position: relative;
+      cursor: pointer;
+      flex-shrink: 0;
+      transition: background-color 0.18s ease, border-color 0.18s ease;
+    }
+
+    .theme-toggle-checkbox::before {
+      content: "";
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: var(--panel-bg);
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.22);
+      transition: transform 0.18s ease;
+    }
+
+    .theme-toggle-checkbox:checked {
+      background: var(--chart-line);
+      border-color: var(--chart-line);
+    }
+
+    .theme-toggle-checkbox:checked::before {
+      transform: translateX(18px);
+    }
+
+    .theme-toggle-checkbox:focus-visible {
+      outline: 2px solid var(--chart-line);
+      outline-offset: 2px;
     }
 
     svg {
       width: 100%;
       height: 100%;
       display: block;
-      background: #fff;
-      border: 1px solid #d0d0d0;
+      background: var(--chart-bg);
+      border: 1px solid var(--border);
     }
 
     .chart-container {
@@ -151,8 +343,8 @@
       pointer-events: none;
       padding: 6px 8px;
       font-size: 12px;
-      color: #fff;
-      background: rgba(34, 34, 34, 0.95);
+      color: var(--tooltip-text);
+      background: var(--tooltip-bg);
       border-radius: 4px;
       white-space: nowrap;
       z-index: 1;
@@ -163,9 +355,9 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      color: #666;
-      border: 1px solid #d0d0d0;
-      background: #fafafa;
+      color: var(--muted);
+      border: 1px solid var(--border);
+      background: var(--panel-subtle-bg);
     }
 
     @media (max-width: 1100px) {
@@ -212,17 +404,23 @@
             <div id="snapshot-count" class="muted">0 saved snapshots</div>
           </div>
           <input id="snapshot-slider" type="range" min="0" max="0" value="0" step="1" disabled>
-          <label class="muted">
-            <input id="follow-latest" type="checkbox" checked>
-            Follow live state
-          </label>
+          <div class="timeline-actions">
+            <label class="muted">
+              <input id="follow-latest" type="checkbox" checked>
+              Follow live state
+            </label>
+            <button id="replay-snapshots-button" class="stat-button" type="button" disabled>Replay from start</button>
+          </div>
         </div>
       </section>
 
       <section class="stats">
         <div class="panel stat">
           <div class="stat-label">Status</div>
-          <div class="stat-note" id="status-text">Waiting for checkpoints...</div>
+          <div class="stat-body">
+            <div class="stat-subvalue" id="status-mode">Waiting</div>
+            <div class="stat-note" id="status-text">Waiting for checkpoints...</div>
+          </div>
         </div>
         <div class="panel stat">
           <div class="stat-label">Tracked Models</div>
@@ -241,13 +439,37 @@
           <div class="stat-value" id="best-elo-value">-</div>
         </div>
         <div class="panel stat">
+          <div class="stat-label">Tracked Checkpoint</div>
+          <div class="tracked-row">
+            <div class="tracked-meta">
+              <div class="stat-subvalue" id="tracked-checkpoint-number">No checkpoint selected</div>
+              <div class="tracked-meta-line" id="tracked-checkpoint-elo"></div>
+              <div class="tracked-meta-line" id="tracked-checkpoint-fights"></div>
+              <div class="stat-note" id="tracked-checkpoint-note">Click a checkpoint dot to track it.</div>
+            </div>
+            <button id="clear-tracked-checkpoint" class="stat-button" type="button" hidden>Stop tracking</button>
+          </div>
+        </div>
+        <div class="panel stat">
           <div class="stat-label">Mean Elo</div>
           <div class="stat-value" id="mean-elo-value">-</div>
         </div>
         <div class="panel stat">
-          <div class="stat-label">Under-sampled Models</div>
-          <div class="stat-value" id="under-sampled-value">-</div>
-          <div class="stat-note" id="under-sampled-note">Models that have participated in fewer than the target number of fights.</div>
+          <div class="stat-label">Fight Count Spread</div>
+          <div class="stat-table">
+            <div class="stat-table-label">1st percentile</div>
+            <div class="stat-table-value" id="fight-count-p01-value">-</div>
+            <div class="stat-table-label">25th percentile</div>
+            <div class="stat-table-value" id="fight-count-p25-value">-</div>
+            <div class="stat-table-label">Median</div>
+            <div class="stat-table-value" id="fight-count-median-value">-</div>
+            <div class="stat-table-label">Mean</div>
+            <div class="stat-table-value" id="fight-count-mean-value">-</div>
+            <div class="stat-table-label">75th percentile</div>
+            <div class="stat-table-value" id="fight-count-p75-value">-</div>
+            <div class="stat-table-label">Max</div>
+            <div class="stat-table-value" id="fight-count-max-value">-</div>
+          </div>
         </div>
         <div class="panel stat">
           <div class="stat-label">Moving Average</div>
@@ -263,6 +485,16 @@
             <input id="moving-average-window" type="range" min="5" max="50" value="15" step="1">
           </div>
         </div>
+        <div class="panel stat">
+          <div class="stat-label">Night Mode</div>
+          <div class="control-stack">
+            <label class="theme-toggle-row" for="night-mode-toggle">
+              <span class="theme-toggle-emoji" aria-hidden="true">☀️</span>
+              <input id="night-mode-toggle" class="theme-toggle-checkbox" type="checkbox" aria-label="Toggle night mode">
+              <span class="theme-toggle-emoji" aria-hidden="true">🌙</span>
+            </label>
+          </div>
+        </div>
       </section>
     </section>
   </main>
@@ -270,6 +502,7 @@
   <script>
     const pollIntervalMs = 400;
     const chartAnimationDurationMs = 220;
+    const checkpointInteractionRadiusPx = 44;
     let movingAverageWindowSize = 15;
     let hoveredIteration = null;
     let hoveredPointer = null;
@@ -279,40 +512,229 @@
     let selectedHistoryIndex = -1;
     let chartAnimationFrame = null;
     let displayedChartState = null;
+    let trackedCheckpointIteration = null;
+    let replayTimer = null;
+    let replayTargetIndex = -1;
+    const uiSettingsStorageKey = "score-four-zero-elo-tracker-ui-settings";
+    const replayIntervalMs = 1000 / 30;
 
     const slider = document.getElementById("snapshot-slider");
     const followLatestCheckbox = document.getElementById("follow-latest");
+    const replaySnapshotsButton = document.getElementById("replay-snapshots-button");
     const movingAverageCheckbox = document.getElementById("show-moving-average");
     const movingAverageWindowSlider = document.getElementById("moving-average-window");
     const movingAverageWindowValue = document.getElementById("moving-average-window-value");
+    const nightModeToggle = document.getElementById("night-mode-toggle");
+    const statusMode = document.getElementById("status-mode");
+    const trackedCheckpointNumber = document.getElementById("tracked-checkpoint-number");
+    const trackedCheckpointElo = document.getElementById("tracked-checkpoint-elo");
+    const trackedCheckpointFights = document.getElementById("tracked-checkpoint-fights");
+    const trackedCheckpointNote = document.getElementById("tracked-checkpoint-note");
+    const fightCountP01Value = document.getElementById("fight-count-p01-value");
+    const fightCountMeanValue = document.getElementById("fight-count-mean-value");
+    const fightCountMedianValue = document.getElementById("fight-count-median-value");
+    const fightCountP25Value = document.getElementById("fight-count-p25-value");
+    const fightCountP75Value = document.getElementById("fight-count-p75-value");
+    const fightCountMaxValue = document.getElementById("fight-count-max-value");
+    const clearTrackedCheckpointButton = document.getElementById("clear-tracked-checkpoint");
     movingAverageWindowSize = Number(movingAverageWindowSlider.value);
+
+    function loadUiSettings() {
+      try {
+        const rawSettings = window.localStorage.getItem(uiSettingsStorageKey);
+        if (!rawSettings) {
+          return {};
+        }
+        const parsedSettings = JSON.parse(rawSettings);
+        return parsedSettings && typeof parsedSettings === "object"
+          ? parsedSettings
+          : {};
+      } catch {
+        return {};
+      }
+    }
+
+    function saveUiSettings() {
+      try {
+        window.localStorage.setItem(
+          uiSettingsStorageKey,
+          JSON.stringify({
+            movingAverageEnabled: movingAverageCheckbox.checked,
+            movingAverageWindowSize,
+            nightModeEnabled: nightModeToggle.checked,
+          }),
+        );
+      } catch {
+        // ignore storage failures and keep the dashboard usable
+      }
+    }
+
+    function applyStoredUiSettings() {
+      const storedSettings = loadUiSettings();
+      if (typeof storedSettings.movingAverageEnabled === "boolean") {
+        movingAverageCheckbox.checked = storedSettings.movingAverageEnabled;
+      }
+      if (Number.isFinite(Number(storedSettings.movingAverageWindowSize))) {
+        const clampedWindowSize = Math.min(
+          Number(movingAverageWindowSlider.max),
+          Math.max(
+            Number(movingAverageWindowSlider.min),
+            Math.round(Number(storedSettings.movingAverageWindowSize)),
+          ),
+        );
+        movingAverageWindowSize = clampedWindowSize;
+        movingAverageWindowSlider.value = String(clampedWindowSize);
+      }
+      if (typeof storedSettings.nightModeEnabled === "boolean") {
+        nightModeToggle.checked = storedSettings.nightModeEnabled;
+      }
+    }
 
     function syncMovingAverageWindowLabel() {
       movingAverageWindowValue.textContent = `${formatInteger(movingAverageWindowSize)} checkpoints`;
+    }
+
+    function isReplayActive() {
+      return replayTimer !== null || replayTargetIndex >= 0;
+    }
+
+    function syncReplayButton() {
+      if (isReplayActive()) {
+        replaySnapshotsButton.disabled = false;
+        replaySnapshotsButton.textContent = "Stop replay";
+        return;
+      }
+
+      replaySnapshotsButton.disabled = historySnapshots.length === 0;
+      replaySnapshotsButton.textContent = "Replay from start";
+    }
+
+    function stopReplay({ returnToLive = false, render = true } = {}) {
+      if (replayTimer !== null) {
+        window.clearInterval(replayTimer);
+        replayTimer = null;
+      }
+      replayTargetIndex = -1;
+
+      if (returnToLive) {
+        followLatestCheckbox.checked = true;
+        selectedHistoryIndex = historySnapshots.length - 1;
+      }
+
+      syncReplayButton();
+
+      if (render) {
+        renderDisplayedSnapshot({ animateChart: false });
+      }
+    }
+
+    function startReplayFromBeginning() {
+      if (!historySnapshots.length) {
+        syncReplayButton();
+        return;
+      }
+
+      stopReplay({ render: false });
+      replayTargetIndex = 0;
+      followLatestCheckbox.checked = false;
+      selectedHistoryIndex = 0;
+      syncReplayButton();
+      renderDisplayedSnapshot({ animateChart: false });
+
+      replayTimer = window.setInterval(() => {
+        replayTargetIndex = historySnapshots.length - 1;
+
+        if (selectedHistoryIndex < replayTargetIndex) {
+          selectedHistoryIndex += 1;
+          renderDisplayedSnapshot({ animateChart: false });
+          return;
+        }
+
+        stopReplay({ returnToLive: true });
+      }, replayIntervalMs);
+
+      syncReplayButton();
+    }
+
+    function getTrackedCheckpointData(snapshot) {
+      if (trackedCheckpointIteration === null || !snapshot?.model_iterations) {
+        return null;
+      }
+
+      const checkpointIndex = snapshot.model_iterations.indexOf(trackedCheckpointIteration);
+      if (checkpointIndex < 0) {
+        return {
+          iteration: trackedCheckpointIteration,
+          missing: true,
+        };
+      }
+
+      return {
+        iteration: snapshot.model_iterations[checkpointIndex],
+        elo: snapshot.elos?.[checkpointIndex],
+        fights: snapshot.fight_counts?.[checkpointIndex] ?? 0,
+        missing: false,
+      };
+    }
+
+    function updateTrackedCheckpointCard(snapshot) {
+      const trackedCheckpoint = getTrackedCheckpointData(snapshot);
+
+      if (trackedCheckpointIteration === null) {
+        trackedCheckpointNumber.textContent = "No checkpoint selected";
+        trackedCheckpointElo.textContent = "";
+        trackedCheckpointFights.textContent = "";
+        trackedCheckpointNote.textContent = "Click a checkpoint dot to track it.";
+        clearTrackedCheckpointButton.hidden = true;
+        return;
+      }
+
+      trackedCheckpointNumber.textContent = `Checkpoint: ${formatInteger(trackedCheckpointIteration)}`;
+      trackedCheckpointNote.textContent = "";
+      clearTrackedCheckpointButton.hidden = false;
+
+      if (!trackedCheckpoint || trackedCheckpoint.missing) {
+        trackedCheckpointElo.textContent = "";
+        trackedCheckpointFights.textContent = "";
+        trackedCheckpointNote.textContent = "Not present in this snapshot.";
+        return;
+      }
+
+      trackedCheckpointElo.textContent = `Elo: ${formatNumber(trackedCheckpoint.elo)}`;
+      trackedCheckpointFights.textContent = `Fights: ${formatInteger(trackedCheckpoint.fights)}`;
+    }
+
+    function applyTheme(isDark) {
+      document.body.dataset.theme = isDark ? "dark" : "light";
+    }
+
+    function getThemeColors() {
+      const styles = getComputedStyle(document.body);
+      return {
+        chartGrid: styles.getPropertyValue("--chart-grid").trim(),
+        chartAxis: styles.getPropertyValue("--chart-axis").trim(),
+        chartBg: styles.getPropertyValue("--chart-bg").trim(),
+        chartLine: styles.getPropertyValue("--chart-line").trim(),
+        chartBest: styles.getPropertyValue("--chart-best").trim(),
+        chartLatest: styles.getPropertyValue("--chart-latest").trim(),
+        chartMuted: styles.getPropertyValue("--chart-muted").trim(),
+        chartAverage: styles.getPropertyValue("--chart-average").trim(),
+        textMuted: styles.getPropertyValue("--muted").trim(),
+      };
     }
 
     function formatInteger(value) {
       if (value === null || value === undefined || Number.isNaN(value)) {
         return "-";
       }
-      return Number(value).toLocaleString();
+      return Number(value).toLocaleString("en-US");
     }
 
     function formatNumber(value, digits = 1) {
       if (value === null || value === undefined || Number.isNaN(value)) {
         return "-";
       }
-      return Number(value).toLocaleString(undefined, {
-        minimumFractionDigits: digits,
-        maximumFractionDigits: digits,
-      });
-    }
-
-    function formatPercent(value, digits = 1) {
-      if (value === null || value === undefined || Number.isNaN(value)) {
-        return "-";
-      }
-      return Number(value).toLocaleString(undefined, {
+      return Number(value).toLocaleString("en-US", {
         minimumFractionDigits: digits,
         maximumFractionDigits: digits,
       });
@@ -367,8 +789,35 @@
         return;
       }
 
-      tooltip.style.left = `${pointer.x + 12}px`;
-      tooltip.style.top = `${pointer.y - 28}px`;
+      const containerRect = container.getBoundingClientRect();
+      const tooltipRect = tooltip.getBoundingClientRect();
+      const margin = 8;
+
+      let left = pointer.x + 12;
+      let top = pointer.y - 28;
+
+      if (left + tooltipRect.width > containerRect.width - margin) {
+        left = containerRect.width - tooltipRect.width - margin;
+      }
+      if (left < margin) {
+        left = margin;
+      }
+
+      if (top + tooltipRect.height > containerRect.height - margin) {
+        top = containerRect.height - tooltipRect.height - margin;
+      }
+      if (top < margin) {
+        top = Math.min(
+          containerRect.height - tooltipRect.height - margin,
+          pointer.y + 16,
+        );
+      }
+      if (top < margin) {
+        top = margin;
+      }
+
+      tooltip.style.left = `${left}px`;
+      tooltip.style.top = `${top}px`;
     }
 
     function getRelativePointer(container) {
@@ -388,17 +837,24 @@
         return null;
       }
 
-      const element = document.elementFromPoint(
-        lastMouseClientPointer.x,
-        lastMouseClientPointer.y,
-      );
-      if (!element || !container.contains(element) || element.tagName !== "circle") {
-        return null;
+      let nearestCircle = null;
+      let nearestDistanceSq = checkpointInteractionRadiusPx ** 2;
+
+      for (const circle of container.querySelectorAll("circle[data-x]")) {
+        const rect = circle.getBoundingClientRect();
+        const centerX = rect.left + rect.width / 2;
+        const centerY = rect.top + rect.height / 2;
+        const dx = lastMouseClientPointer.x - centerX;
+        const dy = lastMouseClientPointer.y - centerY;
+        const distanceSq = dx * dx + dy * dy;
+
+        if (distanceSq <= nearestDistanceSq) {
+          nearestCircle = circle;
+          nearestDistanceSq = distanceSq;
+        }
       }
-      if (!element.hasAttribute("data-x")) {
-        return null;
-      }
-      return element;
+
+      return nearestCircle;
     }
 
     function hideActiveTooltip() {
@@ -421,19 +877,34 @@
       updateTooltipPosition(container, tooltip, hoveredPointer);
     }
 
-    function restoreHoveredTooltip(container, tooltip) {
+    function getCircleByIteration(container, iteration) {
+      if (iteration === null || iteration === undefined) {
+        return null;
+      }
+      return container.querySelector(`circle[data-x="${iteration}"]`);
+    }
+
+    function updateHoverFromPointer(container, tooltip) {
+      hoveredPointer = getRelativePointer(container);
       const circle = getCircleUnderPointer(container);
-      if (!circle) {
+      if (!circle || !hoveredPointer) {
         clearHoveredState();
-        return;
+        return null;
       }
 
       hoveredIteration = circle.dataset.x;
-      hoveredPointer = getRelativePointer(container);
       showTooltipForCircle(container, tooltip, circle);
+      return circle;
+    }
+
+    function restoreHoveredTooltip(container, tooltip) {
+      updateHoverFromPointer(container, tooltip);
     }
 
     function getDisplayedSnapshot() {
+      if (isReplayActive() && selectedHistoryIndex >= 0 && historySnapshots.length) {
+        return historySnapshots[selectedHistoryIndex] ?? currentSnapshot;
+      }
       if (followLatestCheckbox.checked || selectedHistoryIndex < 0 || !historySnapshots.length) {
         return currentSnapshot;
       }
@@ -543,6 +1014,7 @@
 
       const xTicks = makeTicks(minX, maxX, 16);
       const yTicks = makeTicks(chartMinY, chartMaxY, 14);
+      const themeColors = getThemeColors();
 
       const xToSvg = (x) => padding.left + ((x - minX) / (maxX - minX)) * plotWidth;
       const yToSvg = (y) => padding.top + (1 - (y - chartMinY) / (chartMaxY - chartMinY)) * plotHeight;
@@ -563,55 +1035,63 @@
       const gridLines = [
         ...yTicks.map((tick) => {
           const y = yToSvg(tick);
-          return `<line x1="${padding.left}" y1="${y}" x2="${width - padding.right}" y2="${y}" stroke="#dddddd" stroke-width="1" />`;
+          return `<line x1="${padding.left}" y1="${y}" x2="${width - padding.right}" y2="${y}" stroke="${themeColors.chartGrid}" stroke-width="1" />`;
         }),
         ...xTicks.map((tick) => {
           const x = xToSvg(tick);
-          return `<line x1="${x}" y1="${padding.top}" x2="${x}" y2="${height - padding.bottom}" stroke="#dddddd" stroke-width="1" />`;
+          return `<line x1="${x}" y1="${padding.top}" x2="${x}" y2="${height - padding.bottom}" stroke="${themeColors.chartGrid}" stroke-width="1" />`;
         }),
       ].join("");
 
       const xLabels = xTicks.map((tick) => {
         const x = xToSvg(tick);
-        return `<text x="${x}" y="${xTickLabelY}" text-anchor="middle" fill="#666666" font-size="${tickFontSize}">${formatInteger(Math.round(tick))}</text>`;
+        return `<text x="${x}" y="${xTickLabelY}" text-anchor="middle" fill="${themeColors.textMuted}" font-size="${tickFontSize}">${formatInteger(Math.round(tick))}</text>`;
       }).join("");
 
       const yLabels = yTicks.map((tick) => {
         const y = yToSvg(tick);
-        return `<text x="${padding.left - 10}" y="${y + 4}" text-anchor="end" fill="#666666" font-size="${tickFontSize}">${formatInteger(Math.round(tick))}</text>`;
+        return `<text x="${padding.left - 10}" y="${y + 4}" text-anchor="end" fill="${themeColors.textMuted}" font-size="${tickFontSize}">${formatInteger(Math.round(tick))}</text>`;
       }).join("");
 
       const circles = points.map((point) => {
         const x = xToSvg(point.x);
         const y = yToSvg(point.y);
-        let fill = showMovingAverage ? "#8f8f8f" : "#1f77b4";
-        let radius = 3;
+        let fill = showMovingAverage ? themeColors.chartMuted : themeColors.chartLine;
+        let radius = 2.4;
         let opacity = showMovingAverage ? "0.28" : "1";
+        let stroke = "none";
+        let strokeWidth = 0;
 
         if (!showMovingAverage && point.x === latestIteration) {
-          fill = "#2ca02c";
-          radius = 4;
+          fill = themeColors.chartLatest;
+          radius = 3.2;
         }
         if (!showMovingAverage && Math.abs(point.y - maxY) < 1e-9) {
-          fill = "#d62728";
-          radius = 4.5;
+          fill = themeColors.chartBest;
+          radius = 3.6;
+        }
+        if (point.x === trackedCheckpointIteration) {
+          stroke = themeColors.chartAverage;
+          strokeWidth = 2;
+          radius += 0.5;
+          opacity = "1";
         }
 
-        return `<circle cx="${x}" cy="${y}" r="${radius}" fill="${fill}" fill-opacity="${opacity}" data-x="${point.x}" data-y="${point.y}" data-fights="${point.fights}"></circle>`;
+        return `<circle cx="${x}" cy="${y}" r="${radius}" fill="${fill}" fill-opacity="${opacity}" stroke="${stroke}" stroke-width="${strokeWidth}" data-x="${point.x}" data-y="${point.y}" data-fights="${point.fights}"></circle>`;
       }).join("");
 
       container.innerHTML = `
         <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Current Elo curve">
           ${gridLines}
-          <line x1="${padding.left}" y1="${height - padding.bottom}" x2="${width - padding.right}" y2="${height - padding.bottom}" stroke="#222222" stroke-width="1.2"></line>
-          <line x1="${padding.left}" y1="${padding.top}" x2="${padding.left}" y2="${height - padding.bottom}" stroke="#222222" stroke-width="1.2"></line>
-          <path d="${path}" fill="none" stroke="${showMovingAverage ? "#8f8f8f" : "#1f77b4"}" stroke-opacity="${showMovingAverage ? "0.32" : "1"}" stroke-width="${showMovingAverage ? "1.4" : "1.8"}" stroke-linecap="round" stroke-linejoin="round"></path>
-          ${showMovingAverage ? `<path d="${movingAveragePath}" fill="none" stroke="#0f766e" stroke-width="3.1" stroke-linecap="round" stroke-linejoin="round"></path>` : ""}
+          <line x1="${padding.left}" y1="${height - padding.bottom}" x2="${width - padding.right}" y2="${height - padding.bottom}" stroke="${themeColors.chartAxis}" stroke-width="1.2"></line>
+          <line x1="${padding.left}" y1="${padding.top}" x2="${padding.left}" y2="${height - padding.bottom}" stroke="${themeColors.chartAxis}" stroke-width="1.2"></line>
+          <path d="${path}" fill="none" stroke="${showMovingAverage ? themeColors.chartMuted : themeColors.chartLine}" stroke-opacity="${showMovingAverage ? "0.32" : "1"}" stroke-width="${showMovingAverage ? "1.2" : "1.5"}" stroke-linecap="round" stroke-linejoin="round"></path>
+          ${showMovingAverage ? `<path d="${movingAveragePath}" fill="none" stroke="${themeColors.chartAverage}" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"></path>` : ""}
           ${circles}
           ${xLabels}
           ${yLabels}
-          <text x="${width / 2}" y="${xAxisLabelY}" text-anchor="middle" fill="#666666" font-size="${axisLabelFontSize}">Checkpoint iteration</text>
-          <text x="${yAxisTitleX}" y="${height / 2}" text-anchor="middle" fill="#666666" font-size="${axisLabelFontSize}" transform="rotate(-90 ${yAxisTitleX} ${height / 2})">Elo</text>
+          <text x="${width / 2}" y="${xAxisLabelY}" text-anchor="middle" fill="${themeColors.textMuted}" font-size="${axisLabelFontSize}">Checkpoint iteration</text>
+          <text x="${yAxisTitleX}" y="${height / 2}" text-anchor="middle" fill="${themeColors.textMuted}" font-size="${axisLabelFontSize}" transform="rotate(-90 ${yAxisTitleX} ${height / 2})">Elo</text>
         </svg>
         <div class="chart-tooltip"></div>
       `;
@@ -621,25 +1101,34 @@
       container.onmouseleave = () => {
         clearHoveredState();
       };
+      container.onmousemove = (event) => {
+        lastMouseClientPointer = { x: event.clientX, y: event.clientY };
+        updateHoverFromPointer(container, tooltip);
+      };
+      container.onpointerdown = (event) => {
+        if (event.button !== 0) {
+          return;
+        }
 
-      for (const circle of svg.querySelectorAll("circle[data-x]")) {
-        circle.addEventListener("mouseenter", (event) => {
-          lastMouseClientPointer = { x: event.clientX, y: event.clientY };
-          hoveredIteration = circle.dataset.x;
-          hoveredPointer = getRelativePointer(container);
-          showTooltipForCircle(container, tooltip, circle);
-        });
+        event.preventDefault();
+        lastMouseClientPointer = { x: event.clientX, y: event.clientY };
+        const previouslyHoveredIteration = hoveredIteration;
+        const circle = updateHoverFromPointer(container, tooltip);
+        const fallbackCircle = circle === null
+          ? getCircleByIteration(container, previouslyHoveredIteration)
+          : null;
+        const targetCircle = circle ?? fallbackCircle;
 
-        circle.addEventListener("mousemove", (event) => {
-          lastMouseClientPointer = { x: event.clientX, y: event.clientY };
-          hoveredPointer = getRelativePointer(container);
-          updateTooltipPosition(container, tooltip, hoveredPointer);
-        });
+        if (!targetCircle) {
+          return;
+        }
 
-        circle.addEventListener("mouseleave", () => {
-          clearHoveredState();
-        });
-      }
+        hoveredIteration = targetCircle.dataset.x;
+        hoveredPointer = getRelativePointer(container);
+        showTooltipForCircle(container, tooltip, targetCircle);
+        trackedCheckpointIteration = Number(targetCircle.dataset.x);
+        renderDisplayedSnapshot({ animateChart: false });
+      };
 
       restoreHoveredTooltip(container, tooltip);
     }
@@ -661,6 +1150,7 @@
         selectedHistoryIndex = -1;
         document.getElementById("selected-snapshot-label").textContent =
           snapshot ? `Viewing live state @ ${formatInteger(snapshot.total_matches ?? 0)} matches` : "Viewing live state";
+        syncReplayButton();
         return;
       }
 
@@ -668,11 +1158,12 @@
       slider.min = "0";
       slider.max = String(historySnapshots.length - 1);
 
-      if (followLatestCheckbox.checked) {
+      if (followLatestCheckbox.checked && !isReplayActive()) {
         selectedHistoryIndex = historySnapshots.length - 1;
         slider.value = String(selectedHistoryIndex);
         document.getElementById("selected-snapshot-label").textContent =
           snapshot ? `Viewing live state @ ${formatInteger(snapshot.total_matches ?? 0)} matches` : "Viewing live state";
+        syncReplayButton();
         return;
       }
 
@@ -686,6 +1177,7 @@
         selectedSnapshot
           ? `Viewing snapshot @ ${formatInteger(selectedSnapshot.total_matches ?? 0)} matches`
           : "Viewing saved snapshot";
+      syncReplayButton();
     }
 
     function updateStats(snapshot) {
@@ -694,44 +1186,52 @@
         document.getElementById("total-matches-value").textContent = "-";
         document.getElementById("elo-k-value").textContent = "-";
         document.getElementById("mean-elo-value").textContent = "-";
-        document.getElementById("under-sampled-value").textContent = "-";
-        document.getElementById("under-sampled-note").textContent =
-          "Models that have participated in fewer than the target number of fights.";
+        fightCountP01Value.textContent = "-";
+        fightCountMeanValue.textContent = "-";
+        fightCountMedianValue.textContent = "-";
+        fightCountP25Value.textContent = "-";
+        fightCountP75Value.textContent = "-";
+        fightCountMaxValue.textContent = "-";
         document.getElementById("best-elo-value").textContent = "-";
+        statusMode.textContent = "Waiting";
         document.getElementById("status-text").textContent = "Waiting for checkpoints...";
+        updateTrackedCheckpointCard(snapshot);
         return;
       }
-
-      const numModels = Number(snapshot.num_models ?? 0);
-      const underSampledModels = Number(snapshot.under_sampled_models ?? 0);
-      const underSampledPct = numModels > 0
-        ? ` (${formatPercent((100 * underSampledModels) / numModels)}%)`
-        : "";
 
       document.getElementById("num-models-value").textContent = formatInteger(snapshot.num_models);
       document.getElementById("total-matches-value").textContent = formatInteger(snapshot.total_matches);
       document.getElementById("elo-k-value").textContent = formatNumber(snapshot.elo_k);
       document.getElementById("mean-elo-value").textContent = formatNumber(snapshot.mean_elo);
-      document.getElementById("under-sampled-value").textContent = `${formatInteger(underSampledModels)}${underSampledPct}`;
-      document.getElementById("under-sampled-note").textContent =
-        `Models that have participated in fewer than ${formatInteger(snapshot.primary_target_count)} fights.`;
+      fightCountP01Value.textContent = formatNumber(snapshot.fight_count_p01);
+      fightCountMeanValue.textContent = formatNumber(snapshot.fight_count_mean);
+      fightCountMedianValue.textContent = formatNumber(snapshot.fight_count_median);
+      fightCountP25Value.textContent = formatNumber(snapshot.fight_count_p25);
+      fightCountP75Value.textContent = formatNumber(snapshot.fight_count_p75);
+      fightCountMaxValue.textContent = formatNumber(snapshot.fight_count_max);
       document.getElementById("best-elo-value").textContent =
         `${formatNumber(snapshot.best_elo)} @ ${formatInteger(snapshot.best_model_iteration)}/${formatInteger(snapshot.latest_model_iteration)}`;
 
       if ((currentSnapshot?.num_models ?? 0) > 0) {
-        if (followLatestCheckbox.checked || snapshot === currentSnapshot) {
+        if (!isReplayActive() && (followLatestCheckbox.checked || snapshot === currentSnapshot)) {
+          statusMode.textContent = "Live";
           document.getElementById("status-text").textContent =
-            `Live update: ${currentSnapshot.last_update_at ?? "waiting"} | Matches: ${formatInteger(currentSnapshot.total_matches ?? 0)}`;
+            `Updated ${currentSnapshot.last_update_at ?? "waiting"} · ${formatInteger(currentSnapshot.total_matches ?? 0)} matches`;
         } else {
+          statusMode.textContent = "Snapshot";
           document.getElementById("status-text").textContent =
-            `Viewing snapshot @ ${formatInteger(snapshot.total_matches ?? 0)} matches | Live: ${formatInteger(currentSnapshot.total_matches ?? 0)}`;
+            `Viewing ${formatInteger(snapshot.total_matches ?? 0)} matches · Live at ${formatInteger(currentSnapshot.total_matches ?? 0)}`;
         }
       } else if ((snapshot.num_models ?? 0) > 0) {
+        statusMode.textContent = "Snapshot";
         document.getElementById("status-text").textContent =
-          `Viewing snapshot @ ${formatInteger(snapshot.total_matches ?? 0)} matches`;
+          `Viewing ${formatInteger(snapshot.total_matches ?? 0)} matches`;
       } else {
+        statusMode.textContent = "Waiting";
         document.getElementById("status-text").textContent = "Waiting for checkpoints...";
       }
+
+      updateTrackedCheckpointCard(snapshot);
     }
 
     function updateChart(snapshot, { animate = true } = {}) {
@@ -827,6 +1327,7 @@
         await Promise.all([pollState(), pollHistory()]);
         renderDisplayedSnapshot();
       } catch (error) {
+        statusMode.textContent = "Error";
         document.getElementById("status-text").textContent = `Polling error: ${error.message}`;
       } finally {
         setTimeout(loop, pollIntervalMs);
@@ -834,25 +1335,49 @@
     }
 
     slider.addEventListener("input", () => {
+      stopReplay({ render: false });
       selectedHistoryIndex = Number(slider.value);
       followLatestCheckbox.checked = false;
       renderDisplayedSnapshot({ animateChart: false });
     });
 
     followLatestCheckbox.addEventListener("change", () => {
+      stopReplay({ render: false });
       if (followLatestCheckbox.checked) {
         selectedHistoryIndex = historySnapshots.length - 1;
       }
       renderDisplayedSnapshot({ animateChart: false });
     });
 
+    replaySnapshotsButton.addEventListener("click", () => {
+      if (replayTimer !== null) {
+        stopReplay({ returnToLive: true });
+        return;
+      }
+
+      startReplayFromBeginning();
+    });
+
     movingAverageCheckbox.addEventListener("change", () => {
+      saveUiSettings();
       renderDisplayedSnapshot({ animateChart: false });
     });
 
     movingAverageWindowSlider.addEventListener("input", () => {
       movingAverageWindowSize = Number(movingAverageWindowSlider.value);
       syncMovingAverageWindowLabel();
+      saveUiSettings();
+      renderDisplayedSnapshot({ animateChart: false });
+    });
+
+    clearTrackedCheckpointButton.addEventListener("click", () => {
+      trackedCheckpointIteration = null;
+      renderDisplayedSnapshot({ animateChart: false });
+    });
+
+    nightModeToggle.addEventListener("change", () => {
+      applyTheme(nightModeToggle.checked);
+      saveUiSettings();
       renderDisplayedSnapshot({ animateChart: false });
     });
 
@@ -874,6 +1399,8 @@
       renderDisplayedSnapshot({ animateChart: false });
     });
 
+    applyStoredUiSettings();
+    applyTheme(nightModeToggle.checked);
     syncMovingAverageWindowLabel();
     loop();
   </script>

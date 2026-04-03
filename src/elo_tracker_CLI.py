@@ -40,7 +40,6 @@ class LiveEloTracker:
         elo_k: float = 20.0,
         matchup_distance_scale: float = 200.0,
         matchup_min_weight: float = 0.05,
-        primary_target_count: int = 50,
         snapshot_interval_matches: int = 10,
         checkpoint_stable_age_s: float = 2.0,
         idle_sleep_s: float = 1.0,
@@ -53,7 +52,6 @@ class LiveEloTracker:
         self.elo_k = elo_k
         self.matchup_distance_scale = matchup_distance_scale
         self.matchup_min_weight = matchup_min_weight
-        self.primary_target_count = primary_target_count
         self.snapshot_interval_matches = snapshot_interval_matches
         self.checkpoint_stable_age_s = checkpoint_stable_age_s
         self.idle_sleep_s = idle_sleep_s
@@ -65,7 +63,6 @@ class LiveEloTracker:
         self.model_paths = []
         self.elos = []
         self.fight_counts = []
-        self.primary_selection_counts = []
         self._known_model_paths = set()
 
         self.total_matches = 0
@@ -103,12 +100,7 @@ class LiveEloTracker:
             max_tasks_per_child=self.max_tasks_per_child,
         ) as fight_pool:
             while not self._stop_event.is_set():
-                new_iterations = self._discover_new_models()
-                for iteration, initial_elo in new_iterations:
-                    print(
-                        f"Tracking checkpoint iteration {iteration} "
-                        f"with initial Elo {initial_elo:.1f}"
-                    )
+                self._discover_new_models()
 
                 batch = self._sample_batch()
                 if not batch:
@@ -138,9 +130,39 @@ class LiveEloTracker:
             elos=self.elos,
         )
 
-        latest_index = len(self.elos) - 1 if self.elos else None
         mean_elo = float(np.mean(self.elos)) if self.elos else None
         max_elo = float(max(self.elos)) if self.elos else None
+        fight_counts_array = np.asarray(self.fight_counts, dtype=np.float64)
+        fight_count_mean = (
+            float(np.mean(fight_counts_array))
+            if fight_counts_array.size
+            else None
+        )
+        fight_count_p01 = (
+            float(np.percentile(fight_counts_array, 1))
+            if fight_counts_array.size
+            else None
+        )
+        fight_count_median = (
+            float(np.median(fight_counts_array))
+            if fight_counts_array.size
+            else None
+        )
+        fight_count_p25 = (
+            float(np.percentile(fight_counts_array, 25))
+            if fight_counts_array.size
+            else None
+        )
+        fight_count_p75 = (
+            float(np.percentile(fight_counts_array, 75))
+            if fight_counts_array.size
+            else None
+        )
+        fight_count_max = (
+            float(np.max(fight_counts_array))
+            if fight_counts_array.size
+            else None
+        )
 
         snapshot.update(
             {
@@ -149,26 +171,15 @@ class LiveEloTracker:
                 "max_elo": max_elo,
                 "elo_k": float(self.elo_k),
                 "fight_counts": [int(count) for count in self.fight_counts],
+                "fight_count_mean": fight_count_mean,
+                "fight_count_p01": fight_count_p01,
+                "fight_count_median": fight_count_median,
+                "fight_count_p25": fight_count_p25,
+                "fight_count_p75": fight_count_p75,
+                "fight_count_max": fight_count_max,
                 "started_at": self.started_at,
                 "last_update_at": self.last_update_at,
-                "primary_target_count": int(self.primary_target_count),
                 "snapshot_interval_matches": int(self.snapshot_interval_matches),
-                "under_sampled_models": int(
-                    sum(
-                        count < self.primary_target_count
-                        for count in self.fight_counts
-                    )
-                ),
-                "min_primary_selections": (
-                    int(min(self.primary_selection_counts))
-                    if self.primary_selection_counts
-                    else None
-                ),
-                "max_primary_selections": (
-                    int(max(self.primary_selection_counts))
-                    if self.primary_selection_counts
-                    else None
-                ),
             }
         )
         return snapshot
@@ -206,25 +217,12 @@ class LiveEloTracker:
                 self.model_paths.append(normalized_path)
                 self.elos.append(initial_elo)
                 self.fight_counts.append(0)
-                self.primary_selection_counts.append(0)
                 self.last_update_at = datetime.now(timezone.utc).isoformat()
                 self._snapshot = self._build_snapshot_unlocked()
 
             new_models.append((checkpoint_iteration(normalized_path), initial_elo))
 
         return new_models
-
-    def _sample_primary_index_unlocked(self):
-        counts = np.asarray(self.primary_selection_counts, dtype=np.float64)
-        weights = 1.0 + np.clip(
-            self.primary_target_count - counts,
-            a_min=0.0,
-            a_max=None,
-        )
-        probabilities = weights / weights.sum()
-        idx = int(np.random.choice(len(counts), p=probabilities))
-        self.primary_selection_counts[idx] += 1
-        return idx
 
     def _sample_batch(self):
         with self._lock:
@@ -233,12 +231,10 @@ class LiveEloTracker:
 
             batch = []
             for _ in range(self.max_workers):
-                idx1 = self._sample_primary_index_unlocked()
                 idx1, idx2 = sample_matchup(
                     self.elos,
                     distance_scale=self.matchup_distance_scale,
                     min_weight=self.matchup_min_weight,
-                    forced_idx1=idx1,
                 )
                 swapped = bool(np.random.rand() < 0.5)
                 batch.append((idx1, idx2, swapped))
@@ -344,7 +340,6 @@ def main():
     parser.add_argument("--elo-k", type=float, default=20.0)
     parser.add_argument("--matchup-distance-scale", type=float, default=200.0)
     parser.add_argument("--matchup-min-weight", type=float, default=0.05)
-    parser.add_argument("--primary-target-count", type=int, default=50)
     parser.add_argument("--snapshot-interval-matches", type=int, default=10)
     parser.add_argument("--checkpoint-stable-age-s", type=float, default=2.0)
     parser.add_argument("--idle-sleep-s", type=float, default=1.0)
@@ -361,7 +356,6 @@ def main():
         elo_k=args.elo_k,
         matchup_distance_scale=args.matchup_distance_scale,
         matchup_min_weight=args.matchup_min_weight,
-        primary_target_count=args.primary_target_count,
         snapshot_interval_matches=args.snapshot_interval_matches,
         checkpoint_stable_age_s=args.checkpoint_stable_age_s,
         idle_sleep_s=args.idle_sleep_s,

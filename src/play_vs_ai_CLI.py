@@ -54,9 +54,19 @@ def play_vs_ai(checkpoint="last"):
             view.update(minimal=True)
             print()
             print("You: X | AI: O")
-            action = input("Enter your move as xy: ")
-            print(f"You play: x={action[0]}, y={action[1]}")
-            action = int(action[0]) * 4 + int(action[1])
+            while True:
+                action = input("Enter your move as xy: ")
+                if len(action) == 2 and action.isdigit():
+                    x = int(action[0])
+                    y = int(action[1])
+                    if 0 <= x < 4 and 0 <= y < 4:
+                        print(f"You play: x={x}, y={y}")
+                        action = x * 4 + y
+                        break
+                    else:
+                        print("Invalid move. Coordinates must be between 0 and 3.")
+                else:
+                    print("Invalid input. Please enter two digits, e.g., 01")
         else:
             root = mcts.run(root_env=env)
             pi = mcts.visit_counts_to_policy(root=root, temperature=0.0)
