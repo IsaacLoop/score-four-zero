@@ -150,7 +150,7 @@ def train():
             checkpoint_path,
         )
         model_paths.append(checkpoint_path)
-        elos.append(STARTING_ELO)
+        elos.append(elos[-1] if elos else STARTING_ELO)
 
         if len(model_paths) >= 2:
             elos = elo_evaluation_pool.evaluate(
