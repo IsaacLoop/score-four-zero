@@ -13,6 +13,31 @@ from .ReplayBuffer import ReplayBuffer
 from .self_play_parallel import ParallelSelfPlayPool
 
 
+def learning_rate_at_step(
+    step: int,
+    total_steps: int,
+    peak_lr: float,
+    final_lr: float,
+    hold_fraction: float = 0.20,
+    decay_end_fraction: float = 0.95,
+):
+    if total_steps <= 1:
+        return final_lr
+
+    hold_steps = int(total_steps * hold_fraction)
+    decay_end_step = int(total_steps * decay_end_fraction)
+
+    if step < hold_steps:
+        return peak_lr
+
+    if step >= decay_end_step:
+        return final_lr
+
+    decay_span = max(1, decay_end_step - hold_steps)
+    progress = (step - hold_steps) / decay_span
+    return peak_lr + (final_lr - peak_lr) * progress
+
+
 def train():
     NUM_ITERATIONS = 5000
     GAMES_PER_ITERATION = 32
@@ -25,6 +50,7 @@ def train():
     DIRICHLET_ALPHA = 0.3
     DIRICHLET_EPSILON = 0.25
     LEARNING_RATE = 3e-4
+    FINAL_LEARNING_RATE = 3e-5
     WEIGHT_DECAY = 1e-4
     MAX_GRAD_NORM = 1.0
     NUM_SAMPLING_MOVES = 8
@@ -73,12 +99,18 @@ def train():
     elo_evaluation_pool.open()
     elos = []
     model_paths = []
+    total_train_steps = NUM_ITERATIONS * TRAIN_STEPS_PER_ITERATION
+    global_train_step = 0
+    current_lr = LEARNING_RATE
 
-    for iteration in tqdm(
+    iteration_bar = tqdm(
         range(NUM_ITERATIONS),
         desc="Iterations",
         position=0,
-    ):
+    )
+    iteration_bar.set_postfix({"lr": f"{current_lr:.4e}"})
+
+    for iteration in iteration_bar:
 
         # 1 - Self-play
         model.eval()
@@ -119,6 +151,16 @@ def train():
                 device=device,
             )
 
+            current_lr = learning_rate_at_step(
+                step=global_train_step,
+                total_steps=total_train_steps,
+                peak_lr=LEARNING_RATE,
+                final_lr=FINAL_LEARNING_RATE,
+            )
+            iteration_bar.set_postfix({"lr": f"{current_lr:.4e}"})
+            for param_group in optimizer.param_groups:
+                param_group["lr"] = current_lr
+
             optimizer.zero_grad(set_to_none=True)
             policy_logits_batch, value_batch = model(x_batch)
 
@@ -139,6 +181,7 @@ def train():
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
             optimizer.step()
+            global_train_step += 1
 
         # 3 - Evaluating
         checkpoint_path = CHECKPOINT_DIR / f"iteration_{iteration + 1:04d}.pt"
