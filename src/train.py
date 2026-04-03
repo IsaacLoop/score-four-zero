@@ -193,13 +193,15 @@ def train():
             checkpoint_path,
         )
         model_paths.append(checkpoint_path)
-        elos.append(elos[-1] if elos else STARTING_ELO)
+        elos.append(
+            (sum(elos) / len(elos)) if elos else STARTING_ELO
+        )
 
         if len(model_paths) >= 2:
             elos = elo_evaluation_pool.evaluate(
                 elos,
                 model_paths,
-                NUM_EVALUATION_FIGHTS // 2,
+                NUM_EVALUATION_FIGHTS * 4 // 5,
                 always_last=True,
                 desc="Eval latest",
                 position=3,
@@ -208,7 +210,7 @@ def train():
             elos = elo_evaluation_pool.evaluate(
                 elos,
                 model_paths,
-                NUM_EVALUATION_FIGHTS // 2,
+                NUM_EVALUATION_FIGHTS // 5,
                 always_last=False,
                 desc="Eval pool",
                 position=4,
