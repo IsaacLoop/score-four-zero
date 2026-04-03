@@ -26,6 +26,9 @@ from .elo_parallel import (
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CHECKPOINT_DIR = PROJECT_ROOT / "checkpoints"
 DASHBOARD_HTML_PATH = PROJECT_ROOT / "dashboard" / "elo_tracker_dashboard.html"
+WORKER_JS_PATH = PROJECT_ROOT / "dashboard" / "elo_chart_worker.js"
+MIN_WORKERS = 1
+MAX_WORKERS = 24
 
 
 class LiveEloTracker:
@@ -47,7 +50,8 @@ class LiveEloTracker:
     ):
         self.checkpoint_dir = checkpoint_dir
         self.num_simulations = num_simulations
-        self.max_workers = max_workers
+        self.requested_max_workers = self._normalize_max_workers(max_workers)
+        self.active_max_workers = self.requested_max_workers
         self.c_puct = c_puct
         self.elo_k = elo_k
         self.matchup_distance_scale = matchup_distance_scale
@@ -70,14 +74,31 @@ class LiveEloTracker:
         self.last_update_at = None
         self.snapshot_history = []
         self._next_snapshot_match_count = self.snapshot_interval_matches
-        self._snapshot = self._build_snapshot_unlocked()
+        self._chart_version = 0
+        self._chart_snapshot = self._build_chart_snapshot_unlocked()
+        self._summary_snapshot = self._build_summary_snapshot_unlocked(
+            self._chart_snapshot
+        )
+
+    @staticmethod
+    def _normalize_max_workers(max_workers: int) -> int:
+        normalized_workers = int(max_workers)
+        if not (MIN_WORKERS <= normalized_workers <= MAX_WORKERS):
+            raise ValueError(
+                f"max_workers must be between {MIN_WORKERS} and {MAX_WORKERS}"
+            )
+        return normalized_workers
 
     def stop(self):
         self._stop_event.set()
 
     def get_snapshot(self):
         with self._lock:
-            return dict(self._snapshot)
+            return dict(self._summary_snapshot)
+
+    def get_chart_snapshot(self):
+        with self._lock:
+            return dict(self._chart_snapshot)
 
     def get_history(self, after: int = -1):
         with self._lock:
@@ -89,20 +110,42 @@ class LiveEloTracker:
                 "total_snapshots": len(self.snapshot_history),
             }
 
+    def set_max_workers(self, max_workers: int):
+        normalized_workers = self._normalize_max_workers(max_workers)
+
+        with self._lock:
+            if normalized_workers == self.requested_max_workers:
+                return dict(self._summary_snapshot)
+
+            self.requested_max_workers = normalized_workers
+            self._refresh_metadata_unlocked()
+            return dict(self._summary_snapshot)
+
     def run_forever(self):
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-        with ParallelFightPool(
-            model_paths=(),
-            num_simulations=self.num_simulations,
-            max_workers=self.max_workers,
-            c_puct=self.c_puct,
-            max_tasks_per_child=self.max_tasks_per_child,
-        ) as fight_pool:
+        fight_pool = None
+
+        try:
             while not self._stop_event.is_set():
                 self._discover_new_models()
+                desired_workers = self._get_requested_max_workers()
 
-                batch = self._sample_batch()
+                if fight_pool is None or desired_workers != self.active_max_workers:
+                    if fight_pool is not None:
+                        fight_pool.close()
+
+                    fight_pool = ParallelFightPool(
+                        model_paths=(),
+                        num_simulations=self.num_simulations,
+                        max_workers=desired_workers,
+                        c_puct=self.c_puct,
+                        max_tasks_per_child=self.max_tasks_per_child,
+                    )
+                    fight_pool.open()
+                    self._set_active_max_workers(desired_workers)
+
+                batch = self._sample_batch(batch_size=desired_workers)
                 if not batch:
                     time.sleep(self.idle_sleep_s)
                     continue
@@ -122,8 +165,11 @@ class LiveEloTracker:
                     print(f"Match batch failed: {exc}")
                     time.sleep(self.idle_sleep_s)
                     continue
+        finally:
+            if fight_pool is not None:
+                fight_pool.close()
 
-    def _build_snapshot_unlocked(self):
+    def _build_chart_snapshot_unlocked(self):
         snapshot = build_elo_snapshot(
             iteration=self.total_matches,
             model_paths=self.model_paths,
@@ -170,6 +216,8 @@ class LiveEloTracker:
                 "mean_elo": mean_elo,
                 "max_elo": max_elo,
                 "elo_k": float(self.elo_k),
+                "requested_max_workers": int(self.requested_max_workers),
+                "active_max_workers": int(self.active_max_workers),
                 "fight_counts": [int(count) for count in self.fight_counts],
                 "fight_count_mean": fight_count_mean,
                 "fight_count_p01": fight_count_p01,
@@ -180,9 +228,40 @@ class LiveEloTracker:
                 "started_at": self.started_at,
                 "last_update_at": self.last_update_at,
                 "snapshot_interval_matches": int(self.snapshot_interval_matches),
+                "chart_version": int(self._chart_version),
             }
         )
         return snapshot
+
+    def _build_summary_snapshot_unlocked(self, chart_snapshot):
+        return {
+            key: value
+            for key, value in chart_snapshot.items()
+            if key not in {"model_iterations", "elos", "fight_counts"}
+        }
+
+    def _refresh_snapshots_unlocked(self):
+        self._chart_version += 1
+        self._refresh_metadata_unlocked()
+
+    def _refresh_metadata_unlocked(self):
+        self._chart_snapshot = self._build_chart_snapshot_unlocked()
+        self._summary_snapshot = self._build_summary_snapshot_unlocked(
+            self._chart_snapshot
+        )
+
+    def _get_requested_max_workers(self):
+        with self._lock:
+            return int(self.requested_max_workers)
+
+    def _set_active_max_workers(self, max_workers: int):
+        with self._lock:
+            normalized_workers = self._normalize_max_workers(max_workers)
+            if normalized_workers == self.active_max_workers:
+                return
+
+            self.active_max_workers = normalized_workers
+            self._refresh_metadata_unlocked()
 
     def _checkpoint_paths(self):
         checkpoint_paths = self.checkpoint_dir.glob("iteration_*.pt")
@@ -218,19 +297,19 @@ class LiveEloTracker:
                 self.elos.append(initial_elo)
                 self.fight_counts.append(0)
                 self.last_update_at = datetime.now(timezone.utc).isoformat()
-                self._snapshot = self._build_snapshot_unlocked()
+                self._refresh_snapshots_unlocked()
 
             new_models.append((checkpoint_iteration(normalized_path), initial_elo))
 
         return new_models
 
-    def _sample_batch(self):
+    def _sample_batch(self, batch_size: int):
         with self._lock:
             if len(self.model_paths) < 2:
                 return []
 
             batch = []
-            for _ in range(self.max_workers):
+            for _ in range(batch_size):
                 idx1, idx2 = sample_matchup(
                     self.elos,
                     distance_scale=self.matchup_distance_scale,
@@ -265,9 +344,9 @@ class LiveEloTracker:
             self.total_matches += 1
 
             self.last_update_at = datetime.now(timezone.utc).isoformat()
-            self._snapshot = self._build_snapshot_unlocked()
+            self._refresh_snapshots_unlocked()
             while self.total_matches >= self._next_snapshot_match_count:
-                self.snapshot_history.append(copy.deepcopy(self._snapshot))
+                self.snapshot_history.append(copy.deepcopy(self._chart_snapshot))
                 self._next_snapshot_match_count += self.snapshot_interval_matches
 
 
@@ -282,8 +361,16 @@ def make_handler(tracker: LiveEloTracker):
                 self._send_html(DASHBOARD_HTML_PATH.read_text(encoding="utf-8"))
                 return
 
+            if parsed_url.path == "/elo-chart-worker.js":
+                self._send_javascript(WORKER_JS_PATH.read_text(encoding="utf-8"))
+                return
+
             if parsed_url.path == "/api/elo-state":
                 self._send_json(tracker.get_snapshot())
+                return
+
+            if parsed_url.path == "/api/elo-live-chart":
+                self._send_json(tracker.get_chart_snapshot())
                 return
 
             if parsed_url.path == "/api/elo-history":
@@ -305,8 +392,40 @@ def make_handler(tracker: LiveEloTracker):
 
             self.send_error(HTTPStatus.NOT_FOUND, "Not found")
 
+        def do_POST(self):
+            parsed_url = urlsplit(self.path)
+
+            if parsed_url.path == "/api/max-workers":
+                try:
+                    payload = self._read_json()
+                    snapshot = tracker.set_max_workers(payload["max_workers"])
+                except (KeyError, TypeError, json.JSONDecodeError):
+                    self._send_json(
+                        {"error": "Request body must be valid JSON with max_workers."},
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+                except ValueError as exc:
+                    self._send_json(
+                        {"error": str(exc)},
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+
+                self._send_json(snapshot)
+                return
+
+            self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+
         def log_message(self, format, *args):
             return
+
+        def _read_json(self):
+            content_length = int(self.headers.get("Content-Length", "0"))
+            request_body = self.rfile.read(content_length)
+            if not request_body:
+                raise json.JSONDecodeError("Empty body", "", 0)
+            return json.loads(request_body.decode("utf-8"))
 
         def _send_html(self, html: str):
             body = html.encode("utf-8")
@@ -317,10 +436,19 @@ def make_handler(tracker: LiveEloTracker):
             self.end_headers()
             self.wfile.write(body)
 
-        def _send_json(self, payload):
-            body = json.dumps(payload).encode("utf-8")
-            self.send_response(HTTPStatus.OK)
+        def _send_json(self, payload, *, status: HTTPStatus = HTTPStatus.OK):
+            body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _send_javascript(self, source: str):
+            body = source.encode("utf-8")
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/javascript; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
@@ -347,6 +475,10 @@ def main():
 
     if args.snapshot_interval_matches <= 0:
         parser.error("--snapshot-interval-matches must be positive")
+    if not (MIN_WORKERS <= args.workers <= MAX_WORKERS):
+        parser.error(
+            f"--workers must be between {MIN_WORKERS} and {MAX_WORKERS}"
+        )
 
     tracker = LiveEloTracker(
         checkpoint_dir=args.checkpoint_dir.resolve(),
