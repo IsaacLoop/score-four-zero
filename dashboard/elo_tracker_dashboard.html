@@ -1,0 +1,881 @@
+<!-- Entirely vibe-coded file (gpt-5.4 xhigh reasoning). Dashboard CSS/JS is too much of a pain to do manually in 2026 for non-critical code lol -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Score Four Zero Live Elo Tracker</title>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: #f4f4f4;
+      color: #222;
+      overflow: hidden;
+    }
+
+    main {
+      width: calc(100vw - 16px);
+      height: calc(100vh - 16px);
+      margin: 8px;
+      padding: 0;
+    }
+
+    h1, h2 {
+      margin: 0;
+    }
+
+    .panel {
+      background: #fff;
+      border: 1px solid #d0d0d0;
+      padding: 16px;
+    }
+
+    .muted {
+      color: #666;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 320px;
+      gap: 12px;
+      align-items: stretch;
+      height: 100%;
+    }
+
+    .chart-panel {
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    .timeline-controls {
+      flex: 0 0 auto;
+      margin-top: 10px;
+      display: grid;
+      gap: 8px;
+    }
+
+    .timeline-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    input[type="range"] {
+      width: 100%;
+    }
+
+    .stats {
+      display: grid;
+      gap: 10px;
+      align-content: start;
+      height: 100%;
+      overflow: auto;
+      width: 320px;
+      min-width: 320px;
+    }
+
+    .stat {
+      border: 1px solid #d0d0d0;
+      padding: 12px;
+      background: #fafafa;
+    }
+
+    .stat-label {
+      font-size: 13px;
+      color: #666;
+      margin-bottom: 6px;
+    }
+
+    .stat-value {
+      font-size: 22px;
+      font-weight: 700;
+    }
+
+    .stat-note {
+      margin-top: 6px;
+      font-size: 12px;
+      color: #666;
+      line-height: 1.4;
+    }
+
+    .control-stack {
+      display: grid;
+      gap: 10px;
+    }
+
+    .control-label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: #444;
+      font-size: 14px;
+    }
+
+    .slider-label {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      color: #666;
+      font-size: 13px;
+    }
+
+    svg {
+      width: 100%;
+      height: 100%;
+      display: block;
+      background: #fff;
+      border: 1px solid #d0d0d0;
+    }
+
+    .chart-container {
+      position: relative;
+      flex: 1 1 auto;
+      min-height: 0;
+      width: 100%;
+    }
+
+    .chart-tooltip {
+      position: absolute;
+      display: none;
+      pointer-events: none;
+      padding: 6px 8px;
+      font-size: 12px;
+      color: #fff;
+      background: rgba(34, 34, 34, 0.95);
+      border-radius: 4px;
+      white-space: nowrap;
+      z-index: 1;
+    }
+
+    .empty {
+      flex: 1 1 auto;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #666;
+      border: 1px solid #d0d0d0;
+      background: #fafafa;
+    }
+
+    @media (max-width: 1100px) {
+      body {
+        overflow: auto;
+      }
+
+      main {
+        width: auto;
+        height: auto;
+        min-height: calc(100vh - 12px);
+        margin: 6px;
+      }
+
+      .layout {
+        grid-template-columns: 1fr;
+        overflow: auto;
+        height: auto;
+      }
+
+      .stats {
+        width: auto;
+        min-width: 0;
+      }
+
+      svg {
+        min-height: 58vh;
+      }
+
+      .empty {
+        min-height: 58vh;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="layout">
+      <section class="panel chart-panel">
+        <div id="elo-chart" class="empty">No Elo data yet.</div>
+        <div class="timeline-controls">
+          <div class="timeline-row">
+            <div id="selected-snapshot-label" class="muted">Viewing live state</div>
+            <div id="snapshot-count" class="muted">0 saved snapshots</div>
+          </div>
+          <input id="snapshot-slider" type="range" min="0" max="0" value="0" step="1" disabled>
+          <label class="muted">
+            <input id="follow-latest" type="checkbox" checked>
+            Follow live state
+          </label>
+        </div>
+      </section>
+
+      <section class="stats">
+        <div class="panel stat">
+          <div class="stat-label">Status</div>
+          <div class="stat-note" id="status-text">Waiting for checkpoints...</div>
+        </div>
+        <div class="panel stat">
+          <div class="stat-label">Tracked Models</div>
+          <div class="stat-value" id="num-models-value">-</div>
+        </div>
+        <div class="panel stat">
+          <div class="stat-label">Completed Matches</div>
+          <div class="stat-value" id="total-matches-value">-</div>
+        </div>
+        <div class="panel stat">
+          <div class="stat-label">K</div>
+          <div class="stat-value" id="elo-k-value">-</div>
+        </div>
+        <div class="panel stat">
+          <div class="stat-label">Best Elo</div>
+          <div class="stat-value" id="best-elo-value">-</div>
+        </div>
+        <div class="panel stat">
+          <div class="stat-label">Mean Elo</div>
+          <div class="stat-value" id="mean-elo-value">-</div>
+        </div>
+        <div class="panel stat">
+          <div class="stat-label">Under-sampled Models</div>
+          <div class="stat-value" id="under-sampled-value">-</div>
+          <div class="stat-note" id="under-sampled-note">Models that have participated in fewer than the target number of fights.</div>
+        </div>
+        <div class="panel stat">
+          <div class="stat-label">Moving Average</div>
+          <div class="control-stack">
+            <label class="control-label">
+              <input id="show-moving-average" type="checkbox">
+              Show moving average
+            </label>
+            <div class="slider-label">
+              <span>Window</span>
+              <span id="moving-average-window-value">15 checkpoints</span>
+            </div>
+            <input id="moving-average-window" type="range" min="5" max="50" value="15" step="1">
+          </div>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <script>
+    const pollIntervalMs = 400;
+    const chartAnimationDurationMs = 220;
+    let movingAverageWindowSize = 15;
+    let hoveredIteration = null;
+    let hoveredPointer = null;
+    let lastMouseClientPointer = null;
+    let currentSnapshot = null;
+    const historySnapshots = [];
+    let selectedHistoryIndex = -1;
+    let chartAnimationFrame = null;
+    let displayedChartState = null;
+
+    const slider = document.getElementById("snapshot-slider");
+    const followLatestCheckbox = document.getElementById("follow-latest");
+    const movingAverageCheckbox = document.getElementById("show-moving-average");
+    const movingAverageWindowSlider = document.getElementById("moving-average-window");
+    const movingAverageWindowValue = document.getElementById("moving-average-window-value");
+    movingAverageWindowSize = Number(movingAverageWindowSlider.value);
+
+    function syncMovingAverageWindowLabel() {
+      movingAverageWindowValue.textContent = `${formatInteger(movingAverageWindowSize)} checkpoints`;
+    }
+
+    function formatInteger(value) {
+      if (value === null || value === undefined || Number.isNaN(value)) {
+        return "-";
+      }
+      return Number(value).toLocaleString();
+    }
+
+    function formatNumber(value, digits = 1) {
+      if (value === null || value === undefined || Number.isNaN(value)) {
+        return "-";
+      }
+      return Number(value).toLocaleString(undefined, {
+        minimumFractionDigits: digits,
+        maximumFractionDigits: digits,
+      });
+    }
+
+    function formatPercent(value, digits = 1) {
+      if (value === null || value === undefined || Number.isNaN(value)) {
+        return "-";
+      }
+      return Number(value).toLocaleString(undefined, {
+        minimumFractionDigits: digits,
+        maximumFractionDigits: digits,
+      });
+    }
+
+    function makeTicks(minValue, maxValue, tickCount = 6) {
+      if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) {
+        return [];
+      }
+      if (minValue === maxValue) {
+        return [minValue];
+      }
+
+      const span = maxValue - minValue;
+      const rawStep = span / Math.max(1, tickCount - 1);
+      const magnitude = 10 ** Math.floor(Math.log10(rawStep));
+      const normalized = rawStep / magnitude;
+
+      let niceStep;
+      if (normalized <= 1) {
+        niceStep = 1;
+      } else if (normalized <= 2) {
+        niceStep = 2;
+      } else if (normalized <= 5) {
+        niceStep = 5;
+      } else {
+        niceStep = 10;
+      }
+      niceStep *= magnitude;
+
+      const tickStart = Math.floor(minValue / niceStep) * niceStep;
+      const tickEnd = Math.ceil(maxValue / niceStep) * niceStep;
+      const ticks = [];
+      const epsilon = niceStep * 1e-6;
+
+      for (let value = tickStart; value <= tickEnd + niceStep * 0.5; value += niceStep) {
+        const roundedValue = Number(value.toFixed(10));
+        if (roundedValue >= minValue - epsilon && roundedValue <= maxValue + epsilon) {
+          ticks.push(roundedValue);
+        }
+      }
+
+      if (!ticks.length) {
+        ticks.push(Number(((minValue + maxValue) / 2).toFixed(10)));
+      }
+
+      return ticks;
+    }
+
+    function updateTooltipPosition(container, tooltip, pointer) {
+      if (!pointer) {
+        return;
+      }
+
+      tooltip.style.left = `${pointer.x + 12}px`;
+      tooltip.style.top = `${pointer.y - 28}px`;
+    }
+
+    function getRelativePointer(container) {
+      if (!lastMouseClientPointer) {
+        return null;
+      }
+
+      const rect = container.getBoundingClientRect();
+      return {
+        x: lastMouseClientPointer.x - rect.left,
+        y: lastMouseClientPointer.y - rect.top,
+      };
+    }
+
+    function getCircleUnderPointer(container) {
+      if (!lastMouseClientPointer) {
+        return null;
+      }
+
+      const element = document.elementFromPoint(
+        lastMouseClientPointer.x,
+        lastMouseClientPointer.y,
+      );
+      if (!element || !container.contains(element) || element.tagName !== "circle") {
+        return null;
+      }
+      if (!element.hasAttribute("data-x")) {
+        return null;
+      }
+      return element;
+    }
+
+    function hideActiveTooltip() {
+      const tooltip = document.querySelector("#elo-chart .chart-tooltip");
+      if (tooltip) {
+        tooltip.style.display = "none";
+      }
+    }
+
+    function clearHoveredState() {
+      hoveredIteration = null;
+      hoveredPointer = null;
+      hideActiveTooltip();
+    }
+
+    function showTooltipForCircle(container, tooltip, circle) {
+      tooltip.textContent =
+        `checkpoint ${formatInteger(Number(circle.dataset.x))}, elo ${formatNumber(Number(circle.dataset.y))}, fights ${formatInteger(Number(circle.dataset.fights))}`;
+      tooltip.style.display = "block";
+      updateTooltipPosition(container, tooltip, hoveredPointer);
+    }
+
+    function restoreHoveredTooltip(container, tooltip) {
+      const circle = getCircleUnderPointer(container);
+      if (!circle) {
+        clearHoveredState();
+        return;
+      }
+
+      hoveredIteration = circle.dataset.x;
+      hoveredPointer = getRelativePointer(container);
+      showTooltipForCircle(container, tooltip, circle);
+    }
+
+    function getDisplayedSnapshot() {
+      if (followLatestCheckbox.checked || selectedHistoryIndex < 0 || !historySnapshots.length) {
+        return currentSnapshot;
+      }
+      return historySnapshots[selectedHistoryIndex] ?? currentSnapshot;
+    }
+
+    function cloneChartState(state) {
+      if (!state) {
+        return null;
+      }
+      return {
+        latestIteration: state.latestIteration,
+        points: state.points.map((point) => ({ ...point })),
+      };
+    }
+
+    function pointsShareIterations(pointsA, pointsB) {
+      if (!pointsA || !pointsB || pointsA.length !== pointsB.length) {
+        return false;
+      }
+      return pointsA.every((point, index) => point.x === pointsB[index].x);
+    }
+
+    function easeInOutCubic(t) {
+      if (t < 0.5) {
+        return 4 * t * t * t;
+      }
+      return 1 - ((-2 * t + 2) ** 3) / 2;
+    }
+
+    function stopChartAnimation() {
+      if (chartAnimationFrame !== null) {
+        cancelAnimationFrame(chartAnimationFrame);
+        chartAnimationFrame = null;
+      }
+    }
+
+    function computeMovingAveragePoints(points, windowSize) {
+      if (!points.length) {
+        return [];
+      }
+
+      const halfWindow = Math.floor(windowSize / 2);
+      return points.map((point, index) => {
+        const start = Math.max(0, index - halfWindow);
+        const end = Math.min(points.length - 1, index + halfWindow);
+        let sum = 0;
+
+        for (let currentIndex = start; currentIndex <= end; currentIndex += 1) {
+          sum += points[currentIndex].y;
+        }
+
+        return {
+          x: point.x,
+          y: sum / (end - start + 1),
+        };
+      });
+    }
+
+    function renderLineChart(container, points, latestIteration) {
+      if (!points.length) {
+        container.className = "empty";
+        container.textContent = "No Elo data yet.";
+        return;
+      }
+
+      container.className = "chart-container";
+      const rect = container.getBoundingClientRect();
+      const width = Math.max(480, Math.round(rect.width) || 1200);
+      const height = Math.max(320, Math.round(rect.height) || 760);
+      const padding = {
+        top: Math.max(20, Math.round(height * 0.03)),
+        right: Math.max(18, Math.round(width * 0.02)),
+        bottom: Math.max(56, Math.round(height * 0.09)),
+        left: Math.max(64, Math.round(width * 0.06)),
+      };
+      const plotWidth = width - padding.left - padding.right;
+      const plotHeight = height - padding.top - padding.bottom;
+      const tickFontSize = Math.max(11, Math.min(14, Math.round(Math.min(width, height) * 0.017)));
+      const axisLabelFontSize = Math.max(13, Math.min(16, tickFontSize + 2));
+      const yAxisTitleX = Math.max(22, Math.round(padding.left * 0.32));
+      const xAxisLabelY = height - Math.max(8, Math.round(height * 0.012));
+      const xTickLabelY = height - Math.max(22, Math.round(height * 0.04));
+
+      const xValues = points.map((point) => point.x);
+      const yValues = points.map((point) => point.y);
+      const maxY = Math.max(...yValues);
+      const minY = Math.min(...yValues);
+
+      let minX = Math.min(...xValues);
+      let maxX = Math.max(...xValues);
+      let chartMinY = minY;
+      let chartMaxY = maxY;
+
+      if (minX === maxX) {
+        minX -= 1;
+        maxX += 1;
+      }
+      if (chartMinY === chartMaxY) {
+        chartMinY -= 1;
+        chartMaxY += 1;
+      }
+
+      const yPadding = (chartMaxY - chartMinY) * 0.08;
+      chartMinY -= yPadding;
+      chartMaxY += yPadding;
+
+      const xTicks = makeTicks(minX, maxX, 16);
+      const yTicks = makeTicks(chartMinY, chartMaxY, 14);
+
+      const xToSvg = (x) => padding.left + ((x - minX) / (maxX - minX)) * plotWidth;
+      const yToSvg = (y) => padding.top + (1 - (y - chartMinY) / (chartMaxY - chartMinY)) * plotHeight;
+      const showMovingAverage = movingAverageCheckbox.checked;
+      const movingAveragePoints = showMovingAverage
+        ? computeMovingAveragePoints(points, movingAverageWindowSize)
+        : [];
+
+      const path = points.map((point, index) => {
+        const prefix = index === 0 ? "M" : "L";
+        return `${prefix}${xToSvg(point.x).toFixed(2)} ${yToSvg(point.y).toFixed(2)}`;
+      }).join(" ");
+      const movingAveragePath = movingAveragePoints.map((point, index) => {
+        const prefix = index === 0 ? "M" : "L";
+        return `${prefix}${xToSvg(point.x).toFixed(2)} ${yToSvg(point.y).toFixed(2)}`;
+      }).join(" ");
+
+      const gridLines = [
+        ...yTicks.map((tick) => {
+          const y = yToSvg(tick);
+          return `<line x1="${padding.left}" y1="${y}" x2="${width - padding.right}" y2="${y}" stroke="#dddddd" stroke-width="1" />`;
+        }),
+        ...xTicks.map((tick) => {
+          const x = xToSvg(tick);
+          return `<line x1="${x}" y1="${padding.top}" x2="${x}" y2="${height - padding.bottom}" stroke="#dddddd" stroke-width="1" />`;
+        }),
+      ].join("");
+
+      const xLabels = xTicks.map((tick) => {
+        const x = xToSvg(tick);
+        return `<text x="${x}" y="${xTickLabelY}" text-anchor="middle" fill="#666666" font-size="${tickFontSize}">${formatInteger(Math.round(tick))}</text>`;
+      }).join("");
+
+      const yLabels = yTicks.map((tick) => {
+        const y = yToSvg(tick);
+        return `<text x="${padding.left - 10}" y="${y + 4}" text-anchor="end" fill="#666666" font-size="${tickFontSize}">${formatInteger(Math.round(tick))}</text>`;
+      }).join("");
+
+      const circles = points.map((point) => {
+        const x = xToSvg(point.x);
+        const y = yToSvg(point.y);
+        let fill = showMovingAverage ? "#8f8f8f" : "#1f77b4";
+        let radius = 3;
+        let opacity = showMovingAverage ? "0.28" : "1";
+
+        if (!showMovingAverage && point.x === latestIteration) {
+          fill = "#2ca02c";
+          radius = 4;
+        }
+        if (!showMovingAverage && Math.abs(point.y - maxY) < 1e-9) {
+          fill = "#d62728";
+          radius = 4.5;
+        }
+
+        return `<circle cx="${x}" cy="${y}" r="${radius}" fill="${fill}" fill-opacity="${opacity}" data-x="${point.x}" data-y="${point.y}" data-fights="${point.fights}"></circle>`;
+      }).join("");
+
+      container.innerHTML = `
+        <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Current Elo curve">
+          ${gridLines}
+          <line x1="${padding.left}" y1="${height - padding.bottom}" x2="${width - padding.right}" y2="${height - padding.bottom}" stroke="#222222" stroke-width="1.2"></line>
+          <line x1="${padding.left}" y1="${padding.top}" x2="${padding.left}" y2="${height - padding.bottom}" stroke="#222222" stroke-width="1.2"></line>
+          <path d="${path}" fill="none" stroke="${showMovingAverage ? "#8f8f8f" : "#1f77b4"}" stroke-opacity="${showMovingAverage ? "0.32" : "1"}" stroke-width="${showMovingAverage ? "1.4" : "1.8"}" stroke-linecap="round" stroke-linejoin="round"></path>
+          ${showMovingAverage ? `<path d="${movingAveragePath}" fill="none" stroke="#0f766e" stroke-width="3.1" stroke-linecap="round" stroke-linejoin="round"></path>` : ""}
+          ${circles}
+          ${xLabels}
+          ${yLabels}
+          <text x="${width / 2}" y="${xAxisLabelY}" text-anchor="middle" fill="#666666" font-size="${axisLabelFontSize}">Checkpoint iteration</text>
+          <text x="${yAxisTitleX}" y="${height / 2}" text-anchor="middle" fill="#666666" font-size="${axisLabelFontSize}" transform="rotate(-90 ${yAxisTitleX} ${height / 2})">Elo</text>
+        </svg>
+        <div class="chart-tooltip"></div>
+      `;
+
+      const tooltip = container.querySelector(".chart-tooltip");
+      const svg = container.querySelector("svg");
+      container.onmouseleave = () => {
+        clearHoveredState();
+      };
+
+      for (const circle of svg.querySelectorAll("circle[data-x]")) {
+        circle.addEventListener("mouseenter", (event) => {
+          lastMouseClientPointer = { x: event.clientX, y: event.clientY };
+          hoveredIteration = circle.dataset.x;
+          hoveredPointer = getRelativePointer(container);
+          showTooltipForCircle(container, tooltip, circle);
+        });
+
+        circle.addEventListener("mousemove", (event) => {
+          lastMouseClientPointer = { x: event.clientX, y: event.clientY };
+          hoveredPointer = getRelativePointer(container);
+          updateTooltipPosition(container, tooltip, hoveredPointer);
+        });
+
+        circle.addEventListener("mouseleave", () => {
+          clearHoveredState();
+        });
+      }
+
+      restoreHoveredTooltip(container, tooltip);
+    }
+
+    function renderChartState(container, chartState) {
+      displayedChartState = cloneChartState(chartState);
+      renderLineChart(container, chartState.points, chartState.latestIteration);
+    }
+
+    function syncTimeline(snapshot) {
+      document.getElementById("snapshot-count").textContent =
+        `${formatInteger(historySnapshots.length)} saved snapshots`;
+
+      if (!historySnapshots.length) {
+        slider.disabled = true;
+        slider.min = "0";
+        slider.max = "0";
+        slider.value = "0";
+        selectedHistoryIndex = -1;
+        document.getElementById("selected-snapshot-label").textContent =
+          snapshot ? `Viewing live state @ ${formatInteger(snapshot.total_matches ?? 0)} matches` : "Viewing live state";
+        return;
+      }
+
+      slider.disabled = false;
+      slider.min = "0";
+      slider.max = String(historySnapshots.length - 1);
+
+      if (followLatestCheckbox.checked) {
+        selectedHistoryIndex = historySnapshots.length - 1;
+        slider.value = String(selectedHistoryIndex);
+        document.getElementById("selected-snapshot-label").textContent =
+          snapshot ? `Viewing live state @ ${formatInteger(snapshot.total_matches ?? 0)} matches` : "Viewing live state";
+        return;
+      }
+
+      selectedHistoryIndex = Math.min(
+        Math.max(selectedHistoryIndex, 0),
+        historySnapshots.length - 1,
+      );
+      slider.value = String(selectedHistoryIndex);
+      const selectedSnapshot = historySnapshots[selectedHistoryIndex];
+      document.getElementById("selected-snapshot-label").textContent =
+        selectedSnapshot
+          ? `Viewing snapshot @ ${formatInteger(selectedSnapshot.total_matches ?? 0)} matches`
+          : "Viewing saved snapshot";
+    }
+
+    function updateStats(snapshot) {
+      if (!snapshot) {
+        document.getElementById("num-models-value").textContent = "-";
+        document.getElementById("total-matches-value").textContent = "-";
+        document.getElementById("elo-k-value").textContent = "-";
+        document.getElementById("mean-elo-value").textContent = "-";
+        document.getElementById("under-sampled-value").textContent = "-";
+        document.getElementById("under-sampled-note").textContent =
+          "Models that have participated in fewer than the target number of fights.";
+        document.getElementById("best-elo-value").textContent = "-";
+        document.getElementById("status-text").textContent = "Waiting for checkpoints...";
+        return;
+      }
+
+      const numModels = Number(snapshot.num_models ?? 0);
+      const underSampledModels = Number(snapshot.under_sampled_models ?? 0);
+      const underSampledPct = numModels > 0
+        ? ` (${formatPercent((100 * underSampledModels) / numModels)}%)`
+        : "";
+
+      document.getElementById("num-models-value").textContent = formatInteger(snapshot.num_models);
+      document.getElementById("total-matches-value").textContent = formatInteger(snapshot.total_matches);
+      document.getElementById("elo-k-value").textContent = formatNumber(snapshot.elo_k);
+      document.getElementById("mean-elo-value").textContent = formatNumber(snapshot.mean_elo);
+      document.getElementById("under-sampled-value").textContent = `${formatInteger(underSampledModels)}${underSampledPct}`;
+      document.getElementById("under-sampled-note").textContent =
+        `Models that have participated in fewer than ${formatInteger(snapshot.primary_target_count)} fights.`;
+      document.getElementById("best-elo-value").textContent =
+        `${formatNumber(snapshot.best_elo)} @ ${formatInteger(snapshot.best_model_iteration)}/${formatInteger(snapshot.latest_model_iteration)}`;
+
+      if ((currentSnapshot?.num_models ?? 0) > 0) {
+        if (followLatestCheckbox.checked || snapshot === currentSnapshot) {
+          document.getElementById("status-text").textContent =
+            `Live update: ${currentSnapshot.last_update_at ?? "waiting"} | Matches: ${formatInteger(currentSnapshot.total_matches ?? 0)}`;
+        } else {
+          document.getElementById("status-text").textContent =
+            `Viewing snapshot @ ${formatInteger(snapshot.total_matches ?? 0)} matches | Live: ${formatInteger(currentSnapshot.total_matches ?? 0)}`;
+        }
+      } else if ((snapshot.num_models ?? 0) > 0) {
+        document.getElementById("status-text").textContent =
+          `Viewing snapshot @ ${formatInteger(snapshot.total_matches ?? 0)} matches`;
+      } else {
+        document.getElementById("status-text").textContent = "Waiting for checkpoints...";
+      }
+    }
+
+    function updateChart(snapshot, { animate = true } = {}) {
+      const chart = document.getElementById("elo-chart");
+      if (!snapshot) {
+        stopChartAnimation();
+        displayedChartState = null;
+        chart.className = "empty";
+        chart.textContent = "No Elo data yet.";
+        return;
+      }
+
+      const nextChartState = {
+        latestIteration: snapshot.latest_model_iteration,
+        points: (snapshot.model_iterations || []).map((iteration, index) => ({
+          x: iteration,
+          y: snapshot.elos[index],
+          fights: snapshot.fight_counts?.[index] ?? 0,
+        })),
+      };
+
+      if (
+        !animate
+        || !displayedChartState
+        || !pointsShareIterations(displayedChartState.points, nextChartState.points)
+      ) {
+        stopChartAnimation();
+        renderChartState(chart, nextChartState);
+        return;
+      }
+
+      stopChartAnimation();
+      const startState = cloneChartState(displayedChartState);
+      const animationStart = performance.now();
+
+      const animateFrame = (now) => {
+        const progress = Math.min(1, (now - animationStart) / chartAnimationDurationMs);
+        const easedProgress = easeInOutCubic(progress);
+        const interpolatedChartState = {
+          latestIteration: nextChartState.latestIteration,
+          points: nextChartState.points.map((point, index) => ({
+            x: point.x,
+            y: startState.points[index].y + (point.y - startState.points[index].y) * easedProgress,
+            fights: point.fights,
+          })),
+        };
+
+        renderChartState(chart, interpolatedChartState);
+
+        if (progress < 1) {
+          chartAnimationFrame = requestAnimationFrame(animateFrame);
+          return;
+        }
+
+        chartAnimationFrame = null;
+        renderChartState(chart, nextChartState);
+      };
+
+      chartAnimationFrame = requestAnimationFrame(animateFrame);
+    }
+
+    async function pollState() {
+      const response = await fetch("/api/elo-state", { cache: "no-store" });
+      if (!response.ok) {
+        throw new Error(`Failed to fetch live Elo state: ${response.status}`);
+      }
+
+      currentSnapshot = await response.json();
+    }
+
+    async function pollHistory() {
+      const after = historySnapshots.length - 1;
+      const response = await fetch(`/api/elo-history?after=${after}`, { cache: "no-store" });
+      if (!response.ok) {
+        throw new Error(`Failed to fetch live Elo history: ${response.status}`);
+      }
+
+      const payload = await response.json();
+      if (payload.snapshots?.length) {
+        historySnapshots.push(...payload.snapshots);
+      }
+    }
+
+    function renderDisplayedSnapshot({ animateChart = true } = {}) {
+      const snapshot = getDisplayedSnapshot();
+      syncTimeline(snapshot);
+      updateStats(snapshot);
+      updateChart(snapshot, { animate: animateChart });
+    }
+
+    async function loop() {
+      try {
+        await Promise.all([pollState(), pollHistory()]);
+        renderDisplayedSnapshot();
+      } catch (error) {
+        document.getElementById("status-text").textContent = `Polling error: ${error.message}`;
+      } finally {
+        setTimeout(loop, pollIntervalMs);
+      }
+    }
+
+    slider.addEventListener("input", () => {
+      selectedHistoryIndex = Number(slider.value);
+      followLatestCheckbox.checked = false;
+      renderDisplayedSnapshot({ animateChart: false });
+    });
+
+    followLatestCheckbox.addEventListener("change", () => {
+      if (followLatestCheckbox.checked) {
+        selectedHistoryIndex = historySnapshots.length - 1;
+      }
+      renderDisplayedSnapshot({ animateChart: false });
+    });
+
+    movingAverageCheckbox.addEventListener("change", () => {
+      renderDisplayedSnapshot({ animateChart: false });
+    });
+
+    movingAverageWindowSlider.addEventListener("input", () => {
+      movingAverageWindowSize = Number(movingAverageWindowSlider.value);
+      syncMovingAverageWindowLabel();
+      renderDisplayedSnapshot({ animateChart: false });
+    });
+
+    window.addEventListener("mousemove", (event) => {
+      lastMouseClientPointer = { x: event.clientX, y: event.clientY };
+    });
+
+    window.addEventListener("blur", () => {
+      lastMouseClientPointer = null;
+      clearHoveredState();
+    });
+
+    document.addEventListener("mouseleave", () => {
+      lastMouseClientPointer = null;
+      clearHoveredState();
+    });
+
+    window.addEventListener("resize", () => {
+      renderDisplayedSnapshot({ animateChart: false });
+    });
+
+    syncMovingAverageWindowLabel();
+    loop();
+  </script>
+</body>
+</html>

@@ -1,3 +1,4 @@
+import argparse
 import os
 from pathlib import Path
 
@@ -6,8 +7,6 @@ from torch.nn.functional import mse_loss
 from torch.optim import AdamW
 from tqdm import tqdm
 
-from .elo_history import append_elo_snapshot, reset_elo_history
-from .elo_parallel import ParallelEloPool
 from .PolicyValueModel import PolicyValueModel
 from .ReplayBuffer import ReplayBuffer
 from .self_play_parallel import ParallelSelfPlayPool
@@ -38,7 +37,7 @@ def learning_rate_at_step(
     return peak_lr + (final_lr - peak_lr) * progress
 
 
-def train():
+def train(delete_existing_checkpoints: bool = False):
     NUM_ITERATIONS = 5000
     GAMES_PER_ITERATION = 32
     TRAIN_STEPS_PER_ITERATION = 128
@@ -57,18 +56,12 @@ def train():
     N_PARALLEL_WORKERS = min(24, GAMES_PER_ITERATION, os.cpu_count() or 1)
     SELF_PLAY_WORKER_MAX_TASKS = 100
 
-    STARTING_ELO = 500.0
-    NUM_EVALUATION_FIGHTS = 100
-    ELO_EVALUATION_WORKER_MAX_TASKS = 100
-    NUM_SIMULATIONS_EVALUATION = 25
-
-    ARTIFACTS_DIR = Path("artifacts")
     CHECKPOINT_DIR = Path("checkpoints")
-    ELO_HISTORY_PATH = ARTIFACTS_DIR / "elo_history.jsonl"
 
-    ARTIFACTS_DIR.mkdir(exist_ok=True)
     CHECKPOINT_DIR.mkdir(exist_ok=True)
-    reset_elo_history(ELO_HISTORY_PATH)
+    if delete_existing_checkpoints:
+        for checkpoint_path in CHECKPOINT_DIR.glob("iteration_*.pt"):
+            checkpoint_path.unlink()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device} " + ("🥰" if device.type == "cuda" else "😢"))
@@ -90,15 +83,6 @@ def train():
     )
     self_play_pool.open()
 
-    elo_evaluation_pool = ParallelEloPool(
-        num_simulations=NUM_SIMULATIONS_EVALUATION,
-        max_workers=N_PARALLEL_WORKERS,
-        c_puct=C_PUCT,
-        max_tasks_per_child=ELO_EVALUATION_WORKER_MAX_TASKS,
-    )
-    elo_evaluation_pool.open()
-    elos = []
-    model_paths = []
     total_train_steps = NUM_ITERATIONS * TRAIN_STEPS_PER_ITERATION
     global_train_step = 0
     current_lr = LEARNING_RATE
@@ -183,8 +167,8 @@ def train():
             optimizer.step()
             global_train_step += 1
 
-        # 3 - Evaluating
-        checkpoint_path = CHECKPOINT_DIR / f"iteration_{iteration + 1:04d}.pt"
+        # 3 - Checkpointing
+        checkpoint_path = CHECKPOINT_DIR / f"iteration_{iteration}.pt"
         torch.save(
             {
                 "iteration": iteration + 1,
@@ -192,41 +176,16 @@ def train():
             },
             checkpoint_path,
         )
-        model_paths.append(checkpoint_path)
-        elos.append(
-            (sum(elos) / len(elos)) if elos else STARTING_ELO
-        )
-
-        if len(model_paths) >= 2:
-            elos = elo_evaluation_pool.evaluate(
-                elos,
-                model_paths,
-                NUM_EVALUATION_FIGHTS * 4 // 5,
-                always_last=True,
-                desc="Eval latest",
-                position=3,
-                leave=False,
-            )
-            elos = elo_evaluation_pool.evaluate(
-                elos,
-                model_paths,
-                NUM_EVALUATION_FIGHTS // 5,
-                always_last=False,
-                desc="Eval pool",
-                position=4,
-                leave=False,
-            )
-
-        append_elo_snapshot(
-            ELO_HISTORY_PATH,
-            iteration=iteration + 1,
-            model_paths=model_paths,
-            elos=elos,
-        )
 
     self_play_pool.close()
-    elo_evaluation_pool.close()
 
 
 if __name__ == "__main__":
-    train()
+    parser = argparse.ArgumentParser(description="Train the Score Four Zero model.")
+    parser.add_argument(
+        "--delete-existing-checkpoints",
+        action="store_true",
+        help="Delete existing iteration_*.pt checkpoints before training starts.",
+    )
+    args = parser.parse_args()
+    train(delete_existing_checkpoints=args.delete_existing_checkpoints)

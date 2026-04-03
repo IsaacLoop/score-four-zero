@@ -20,7 +20,7 @@ def resolve_checkpoint_path(checkpoint):
         return checkpoint_paths[-1]
 
     checkpoint_number = int(checkpoint)
-    checkpoint_path = checkpoint_dir / f"iteration_{checkpoint_number:04d}.pt"
+    checkpoint_path = checkpoint_dir / f"iteration_{checkpoint_number}.pt"
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
     return checkpoint_path

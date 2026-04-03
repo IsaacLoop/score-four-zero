@@ -1,5 +1,5 @@
 """
-Entirely vibe-coded file (gpt-4 xhigh reasoning). Parallelization is too much of a pain to do manually in 2026 for non-critical code lol
+Entirely vibe-coded file (gpt-5.4 xhigh reasoning). Parallelization is too much of a pain to do manually in 2026 for non-critical code lol
 """
 
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -188,11 +188,10 @@ class ParallelFightPool:
         ]
         return self.fight_path_results(path_matchups, desc=desc)
 
-    def fight_path_results(self, path_matchups, desc: str | None = "Fights"):
+    def iter_fight_path_results(self, path_matchups, desc: str | None = "Fights"):
         if self.executor is None:
             raise RuntimeError("ParallelFightPool must be opened before use.")
 
-        results = [None] * len(path_matchups)
         future_to_matchup_index = {
             self.executor.submit(_fight_worker, path1, path2): matchup_index
             for matchup_index, (path1, path2) in enumerate(path_matchups)
@@ -208,7 +207,15 @@ class ParallelFightPool:
 
         for future in completed_futures:
             matchup_index = future_to_matchup_index[future]
-            results[matchup_index] = future.result()
+            yield matchup_index, future.result()
+
+    def fight_path_results(self, path_matchups, desc: str | None = "Fights"):
+        results = [None] * len(path_matchups)
+        for matchup_index, result in self.iter_fight_path_results(
+            path_matchups,
+            desc=desc,
+        ):
+            results[matchup_index] = result
 
         return results
 

@@ -1,5 +1,7 @@
-import json
-from json import JSONDecodeError
+"""
+Entirely vibe-coded file (gpt-5). Tiny helper file, but rating snapshot glue is too boring to do manually in 2026 lol
+"""
+
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -39,40 +41,3 @@ def build_elo_snapshot(iteration: int, model_paths, elos):
         "best_model_iteration": best_model_iteration,
         "best_elo": best_elo,
     }
-
-
-def append_elo_snapshot(log_path, iteration: int, model_paths, elos):
-    log_path = Path(log_path)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-
-    snapshot = build_elo_snapshot(iteration, model_paths, elos)
-    with log_path.open("a", encoding="utf-8") as log_file:
-        json.dump(snapshot, log_file)
-        log_file.write("\n")
-
-    return snapshot
-
-
-def reset_elo_history(log_path):
-    log_path = Path(log_path)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_path.write_text("", encoding="utf-8")
-
-
-def load_elo_snapshots(log_path):
-    log_path = Path(log_path)
-    if not log_path.exists():
-        return []
-
-    snapshots = []
-    with log_path.open("r", encoding="utf-8") as log_file:
-        for line in log_file:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                snapshots.append(json.loads(line))
-            except JSONDecodeError:
-                continue
-
-    return snapshots
