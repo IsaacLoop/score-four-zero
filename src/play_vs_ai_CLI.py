@@ -7,6 +7,7 @@ import torch
 from src.Env import Env
 from src.MCTS import MCTS
 from src.PolicyValueModel import PolicyValueModel
+from src.elo_history import checkpoint_iteration
 from src.views import AsciiView
 
 
@@ -14,7 +15,10 @@ def resolve_checkpoint_path(checkpoint):
     checkpoint_dir = Path("checkpoints")
 
     if checkpoint == "last":
-        checkpoint_paths = sorted(checkpoint_dir.glob("iteration_*.pt"))
+        checkpoint_paths = sorted(
+            checkpoint_dir.glob("iteration_*.pt"),
+            key=checkpoint_iteration,
+        )
         if not checkpoint_paths:
             raise FileNotFoundError("No checkpoints found in checkpoints/.")
         return checkpoint_paths[-1]
