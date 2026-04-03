@@ -609,7 +609,7 @@
   <main>
     <section class="layout">
       <section class="panel chart-panel">
-        <div id="elo-chart" class="empty">No Elo data yet.</div>
+        <div id="elo-chart" class="empty">Loading live summary...</div>
         <div class="timeline-controls">
           <div class="timeline-row">
             <div id="selected-snapshot-label" class="muted">Viewing live state</div>
@@ -632,6 +632,9 @@
                   <option value="480">480 snapshots/s</option>
                   <option value="960">960 snapshots/s</option>
                   <option value="1080">1,080 snapshots/s</option>
+                  <option value="2160">2,160 snapshots/s</option>
+                  <option value="4320">4,320 snapshots/s</option>
+                  <option value="8640">8,640 snapshots/s</option>
                 </select>
               </label>
               <button id="replay-snapshots-button" class="stat-button" type="button" disabled>Replay from start</button>
@@ -755,6 +758,7 @@
     const jsonPollRetryDelayMs = 120;
     const minimalModeTargetPoints = 500;
     const minimalModeExtremaCount = 3;
+    const minimalModeAnimationDurationMs = 180;
     let movingAverageWindowSize = 15;
     let hoveredIteration = null;
     let hoveredPointer = null;
@@ -777,9 +781,12 @@
     let replayTargetIndex = -1;
     let replayStartedAtMs = 0;
     let replayStartedIndex = 0;
+    let replayPosition = -1;
     let pendingWorkerCount = null;
     let isUpdatingWorkerCount = false;
     let workerCountUpdateError = "";
+    let isWorkerSliderPointerDown = false;
+    let suppressNextWorkerSliderChange = false;
     let preferredMovingAverageEnabled = false;
     let lastMinimalModeEnabled = null;
     const matchRateSamples = [];
@@ -948,6 +955,7 @@
       replayTargetIndex = -1;
       replayStartedAtMs = 0;
       replayStartedIndex = 0;
+      replayPosition = -1;
 
       if (returnToLive) {
         followLatestCheckbox.checked = true;
@@ -973,8 +981,9 @@
       selectedHistoryIndex = 0;
       replayStartedAtMs = performance.now();
       replayStartedIndex = 0;
+      replayPosition = 0;
       syncReplayButton();
-      renderDisplayedSnapshot({ animateChart: false });
+      renderDisplayedSnapshot({ animateChart: minimalModeCheckbox.checked });
 
       const stepReplay = (nowMs) => {
         replayAnimationFrame = null;
@@ -988,16 +997,23 @@
 
         const elapsedSnapshots = Math.max(
           0,
-          Math.floor((nowMs - replayStartedAtMs) / (1000 / replaySnapshotsPerSecond)),
+          (nowMs - replayStartedAtMs) / (1000 / replaySnapshotsPerSecond),
         );
-        const nextHistoryIndex = Math.min(
+        const nextReplayPosition = Math.min(
           replayTargetIndex,
           replayStartedIndex + elapsedSnapshots,
         );
+        const nextHistoryIndex = Math.floor(nextReplayPosition);
+        const replayPositionChanged = nextReplayPosition !== replayPosition;
+        replayPosition = nextReplayPosition;
 
-        if (nextHistoryIndex !== selectedHistoryIndex) {
+        const historyIndexChanged = nextHistoryIndex !== selectedHistoryIndex;
+        if (historyIndexChanged) {
           selectedHistoryIndex = nextHistoryIndex;
-          renderDisplayedSnapshot({ animateChart: false });
+        }
+
+        if (minimalModeCheckbox.checked ? replayPositionChanged : historyIndexChanged) {
+          renderDisplayedSnapshot({ animateChart: minimalModeCheckbox.checked });
         }
 
         if (selectedHistoryIndex >= replayTargetIndex) {
@@ -1372,6 +1388,21 @@
       let nearestPointIndex = -1;
       let nearestDistanceSq = checkpointInteractionRadiusPx ** 2;
 
+      if (pointCount <= 16) {
+        for (let pointIndex = 0; pointIndex < pointCount; pointIndex += 1) {
+          const dx = pointer.x - cxs[pointIndex];
+          const dy = pointer.y - cys[pointIndex];
+          const distanceSq = dx * dx + dy * dy;
+
+          if (distanceSq <= nearestDistanceSq) {
+            nearestPointIndex = pointIndex;
+            nearestDistanceSq = distanceSq;
+          }
+        }
+
+        return buildInteractivePoint(chartData, nearestPointIndex);
+      }
+
       let low = 0;
       let high = pointCount;
       while (low < high) {
@@ -1491,6 +1522,41 @@
     }
 
     function getDisplayedChartSnapshot() {
+      if (minimalModeCheckbox.checked && isReplayActive() && historySnapshots.length) {
+        const baseIndex = Math.min(
+          historySnapshots.length - 1,
+          Math.max(0, Math.floor(replayPosition >= 0 ? replayPosition : selectedHistoryIndex)),
+        );
+        const nextIndex = Math.min(historySnapshots.length - 1, baseIndex + 1);
+        const mix = Math.min(
+          1,
+          Math.max(0, (replayPosition >= 0 ? replayPosition : baseIndex) - baseIndex),
+        );
+
+        if (mix > 0 && nextIndex !== baseIndex) {
+          return {
+            replayInterpolated: true,
+            leftSnapshot: historySnapshots[baseIndex] ?? currentChartSnapshot,
+            rightSnapshot: historySnapshots[nextIndex] ?? currentChartSnapshot,
+            mix,
+            total_matches: lerpNumber(
+              historySnapshots[baseIndex]?.total_matches ?? 0,
+              historySnapshots[nextIndex]?.total_matches ?? 0,
+              mix,
+            ),
+            latest_model_iteration: lerpNumber(
+              historySnapshots[baseIndex]?.latest_model_iteration ?? 0,
+              historySnapshots[nextIndex]?.latest_model_iteration ?? 0,
+              mix,
+            ),
+            num_models: Math.max(
+              historySnapshots[baseIndex]?.num_models ?? 0,
+              historySnapshots[nextIndex]?.num_models ?? 0,
+            ),
+          };
+        }
+      }
+
       if (isReplayActive() && selectedHistoryIndex >= 0 && historySnapshots.length) {
         return historySnapshots[selectedHistoryIndex] ?? currentChartSnapshot;
       }
@@ -1544,6 +1610,9 @@
         nightModeEnabled: nightModeToggle.checked,
         trackedCheckpointIteration: minimalModeCheckbox.checked ? null : trackedCheckpointIteration,
         minimalModeEnabled: minimalModeCheckbox.checked,
+        replayPosition: minimalModeCheckbox.checked && isReplayActive()
+          ? Number((replayPosition >= 0 ? replayPosition : selectedHistoryIndex).toFixed(4))
+          : null,
       });
     }
 
@@ -1611,7 +1680,26 @@
       return lowerValue + mix * (upperValue - lowerValue);
     }
 
-    function buildMinimalModeSeries(iterations, elos) {
+    function lerpNumber(startValue, endValue, mix) {
+      return Number(startValue) + (Number(endValue) - Number(startValue)) * mix;
+    }
+
+    function interpolateNumericArrays(leftValues, rightValues, mix) {
+      const valueCount = Math.min(leftValues.length, rightValues.length);
+      const interpolatedValues = new Array(valueCount);
+
+      for (let valueIndex = 0; valueIndex < valueCount; valueIndex += 1) {
+        interpolatedValues[valueIndex] = lerpNumber(
+          leftValues[valueIndex],
+          rightValues[valueIndex],
+          mix,
+        );
+      }
+
+      return interpolatedValues;
+    }
+
+    function buildMinimalModeSeries(iterations, elos, forcedPointCount = null) {
       const pointCount = Math.min(iterations.length, elos.length);
       if (!pointCount) {
         return {
@@ -1624,7 +1712,7 @@
         };
       }
 
-      if (pointCount <= minimalModeTargetPoints) {
+      if (forcedPointCount === null && pointCount <= minimalModeTargetPoints) {
         const normalizedElos = Array.from(elos, (elo) => Number(elo));
         return {
           iterations: Array.from(iterations, (iteration) => Number(iteration)),
@@ -1636,8 +1724,12 @@
         };
       }
 
-      const bucketWidth = Math.max(1, Math.ceil(pointCount / minimalModeTargetPoints));
-      const bucketCount = Math.ceil(pointCount / bucketWidth);
+      const bucketWidth = forcedPointCount === null
+        ? Math.max(1, Math.ceil(pointCount / minimalModeTargetPoints))
+        : null;
+      const bucketCount = forcedPointCount === null
+        ? Math.ceil(pointCount / bucketWidth)
+        : Math.max(1, Math.min(pointCount, Math.round(Number(forcedPointCount))));
       const reducedIterations = new Array(bucketCount);
       const reducedCenterElos = new Array(bucketCount);
       const reducedLowerElos = new Array(bucketCount);
@@ -1646,8 +1738,15 @@
       const reducedWhiskerUpperElos = new Array(bucketCount);
 
       for (let bucketIndex = 0; bucketIndex < bucketCount; bucketIndex += 1) {
-        const startIndex = bucketIndex * bucketWidth;
-        const endIndex = Math.min(pointCount, startIndex + bucketWidth);
+        const startIndex = forcedPointCount === null
+          ? bucketIndex * bucketWidth
+          : Math.floor((bucketIndex * pointCount) / bucketCount);
+        const endIndex = forcedPointCount === null
+          ? Math.min(pointCount, startIndex + bucketWidth)
+          : Math.max(
+            startIndex + 1,
+            Math.floor(((bucketIndex + 1) * pointCount) / bucketCount),
+          );
         const representativeIndex =
           bucketIndex === 0
             ? 0
@@ -1744,7 +1843,183 @@
       };
     }
 
+    function buildMinimalModeComponents(snapshot, forcedPointCount = null) {
+      const iterations = snapshot?.model_iterations ?? [];
+      const elos = snapshot?.elos ?? [];
+      const fightCounts = snapshot?.fight_counts ?? [];
+      const reducedSeries = buildMinimalModeSeries(
+        iterations,
+        elos,
+        forcedPointCount,
+      );
+      const highlights = buildMinimalModeHighlights(iterations, elos, fightCounts);
+
+      return {
+        reducedSeries,
+        highlights,
+        smoothedCenterElos: computeMovingAverageValues(
+          reducedSeries.centerElos,
+          movingAverageWindowSize,
+        ),
+        smoothedLowerElos: computeMovingAverageValues(
+          reducedSeries.lowerElos,
+          movingAverageWindowSize,
+        ),
+        smoothedUpperElos: computeMovingAverageValues(
+          reducedSeries.upperElos,
+          movingAverageWindowSize,
+        ),
+        smoothedWhiskerLowerElos: computeMovingAverageValues(
+          reducedSeries.whiskerLowerElos,
+          movingAverageWindowSize,
+        ),
+        smoothedWhiskerUpperElos: computeMovingAverageValues(
+          reducedSeries.whiskerUpperElos,
+          movingAverageWindowSize,
+        ),
+      };
+    }
+
+    function interpolateMinimalModeHighlights(leftHighlights, rightHighlights, mix) {
+      const pointCount = Math.min(
+        leftHighlights.iterations.length,
+        rightHighlights.iterations.length,
+      );
+
+      if (!pointCount) {
+        return {
+          iterations: [],
+          elos: [],
+          fightCounts: [],
+          labels: [],
+          kinds: [],
+        };
+      }
+
+      return {
+        iterations: interpolateNumericArrays(
+          leftHighlights.iterations,
+          rightHighlights.iterations,
+          mix,
+        ),
+        elos: interpolateNumericArrays(
+          leftHighlights.elos,
+          rightHighlights.elos,
+          mix,
+        ),
+        fightCounts: interpolateNumericArrays(
+          leftHighlights.fightCounts,
+          rightHighlights.fightCounts,
+          mix,
+        ).map((fightCount) => Math.round(fightCount)),
+        labels: rightHighlights.labels.slice(0, pointCount),
+        kinds: rightHighlights.kinds.slice(0, pointCount),
+      };
+    }
+
     function buildChartRenderModel(snapshot) {
+      if (snapshot?.replayInterpolated && minimalModeCheckbox.checked) {
+        const leftSnapshot = snapshot.leftSnapshot ?? null;
+        const rightSnapshot = snapshot.rightSnapshot ?? null;
+        const mix = Math.min(1, Math.max(0, Number(snapshot.mix ?? 0)));
+        const leftPointCount = Math.min(
+          leftSnapshot?.model_iterations?.length ?? 0,
+          leftSnapshot?.elos?.length ?? 0,
+        );
+        const rightPointCount = Math.min(
+          rightSnapshot?.model_iterations?.length ?? 0,
+          rightSnapshot?.elos?.length ?? 0,
+        );
+
+        if (!leftPointCount || !rightPointCount) {
+          return null;
+        }
+
+        const sharedPointCount = Math.max(
+          1,
+          Math.min(minimalModeTargetPoints, leftPointCount, rightPointCount),
+        );
+        const leftComponents = buildMinimalModeComponents(
+          leftSnapshot,
+          sharedPointCount,
+        );
+        const rightComponents = buildMinimalModeComponents(
+          rightSnapshot,
+          sharedPointCount,
+        );
+        const interpolatedIterations = interpolateNumericArrays(
+          leftComponents.reducedSeries.iterations,
+          rightComponents.reducedSeries.iterations,
+          mix,
+        );
+        const interpolatedCenterElos = interpolateNumericArrays(
+          leftComponents.smoothedCenterElos,
+          rightComponents.smoothedCenterElos,
+          mix,
+        );
+        const interpolatedLowerElos = interpolateNumericArrays(
+          leftComponents.smoothedLowerElos,
+          rightComponents.smoothedLowerElos,
+          mix,
+        );
+        const interpolatedUpperElos = interpolateNumericArrays(
+          leftComponents.smoothedUpperElos,
+          rightComponents.smoothedUpperElos,
+          mix,
+        );
+        const interpolatedWhiskerLowerElos = interpolateNumericArrays(
+          leftComponents.smoothedWhiskerLowerElos,
+          rightComponents.smoothedWhiskerLowerElos,
+          mix,
+        );
+        const interpolatedWhiskerUpperElos = interpolateNumericArrays(
+          leftComponents.smoothedWhiskerUpperElos,
+          rightComponents.smoothedWhiskerUpperElos,
+          mix,
+        );
+        const interpolatedHighlights = interpolateMinimalModeHighlights(
+          leftComponents.highlights,
+          rightComponents.highlights,
+          mix,
+        );
+
+        return {
+          minimalModeEnabled: true,
+          lineIterations: interpolatedIterations,
+          lineElos: interpolatedCenterElos,
+          bandLowerElos: interpolatedLowerElos,
+          bandUpperElos: interpolatedUpperElos,
+          whiskerLowerElos: interpolatedWhiskerLowerElos,
+          whiskerUpperElos: interpolatedWhiskerUpperElos,
+          layoutIterations: interpolatedIterations
+            .concat(
+              interpolatedIterations,
+              interpolatedIterations,
+              interpolatedIterations,
+              interpolatedIterations,
+              interpolatedHighlights.iterations,
+            ),
+          layoutElos: interpolatedCenterElos
+            .concat(
+              interpolatedLowerElos,
+              interpolatedUpperElos,
+              interpolatedWhiskerLowerElos,
+              interpolatedWhiskerUpperElos,
+              interpolatedHighlights.elos,
+            ),
+          interactiveIterations: interpolatedHighlights.iterations,
+          interactiveElos: interpolatedHighlights.elos,
+          interactiveFightCounts: interpolatedHighlights.fightCounts,
+          interactiveLabels: interpolatedHighlights.labels,
+          latestIteration: null,
+          showMovingAverage: true,
+          trackedCheckpointIteration: null,
+          highlightIterations: interpolatedHighlights.iterations,
+          highlightElos: interpolatedHighlights.elos,
+          highlightKinds: interpolatedHighlights.kinds,
+        };
+      }
+
       const iterations = snapshot?.model_iterations ?? [];
       const elos = snapshot?.elos ?? [];
       const fightCounts = snapshot?.fight_counts ?? [];
@@ -1778,28 +2053,15 @@
         };
       }
 
-      const reducedSeries = buildMinimalModeSeries(iterations, elos);
-      const highlights = buildMinimalModeHighlights(iterations, elos, fightCounts);
-      const smoothedCenterElos = computeMovingAverageValues(
-        reducedSeries.centerElos,
-        movingAverageWindowSize,
-      );
-      const smoothedLowerElos = computeMovingAverageValues(
-        reducedSeries.lowerElos,
-        movingAverageWindowSize,
-      );
-      const smoothedUpperElos = computeMovingAverageValues(
-        reducedSeries.upperElos,
-        movingAverageWindowSize,
-      );
-      const smoothedWhiskerLowerElos = computeMovingAverageValues(
-        reducedSeries.whiskerLowerElos,
-        movingAverageWindowSize,
-      );
-      const smoothedWhiskerUpperElos = computeMovingAverageValues(
-        reducedSeries.whiskerUpperElos,
-        movingAverageWindowSize,
-      );
+      const {
+        reducedSeries,
+        highlights,
+        smoothedCenterElos,
+        smoothedLowerElos,
+        smoothedUpperElos,
+        smoothedWhiskerLowerElos,
+        smoothedWhiskerUpperElos,
+      } = buildMinimalModeComponents(snapshot);
 
       return {
         minimalModeEnabled: true,
@@ -2031,6 +2293,21 @@
       };
     }
 
+    function buildMinimalModeAnimatedLayout(layout, chartMinY, chartMaxY) {
+      const yTicks = makeTicks(chartMinY, chartMaxY, 14);
+      const yToCanvas = (y) =>
+        layout.padding.top
+        + (1 - (y - chartMinY) / (chartMaxY - chartMinY)) * layout.plotHeight;
+
+      return {
+        ...layout,
+        chartMinY,
+        chartMaxY,
+        yTicks,
+        yToCanvas,
+      };
+    }
+
     function canAnimateMinimalModeTransition(previousFrame, nextFrame) {
       if (!previousFrame || !nextFrame) {
         return false;
@@ -2181,7 +2458,16 @@
       ctx.restore();
     }
 
-    function renderAnimatedMinimalModeChart(container, canvas, width, height, layout, themeColors, renderModel) {
+    function renderAnimatedMinimalModeChart(
+      container,
+      canvas,
+      width,
+      height,
+      layout,
+      themeColors,
+      renderModel,
+      { animate = true } = {},
+    ) {
       stopMinimalModeAnimation(container);
 
       const devicePixelRatio = Math.max(1, window.devicePixelRatio || 1);
@@ -2203,31 +2489,55 @@
         layout.xToCanvas,
         layout.yToCanvas,
       );
-      const previousLogicalFrame = container._minimalModeLogicalFrame ?? null;
+      const previousDisplayedLogicalFrame = container._minimalModeDisplayedLogicalFrame ?? null;
+      const previousDisplayedProjectedFrame = container._minimalModeDisplayedProjectedFrame ?? null;
+      const previousDisplayedLayout = container._minimalModeDisplayedLayout ?? null;
       const shouldAnimate = canAnimateMinimalModeTransition(
-        previousLogicalFrame,
+        previousDisplayedLogicalFrame,
         nextLogicalFrame,
-      );
+      )
+        && previousDisplayedProjectedFrame !== null
+        && previousDisplayedLayout !== null
+        && previousDisplayedLayout.plotWidth === layout.plotWidth
+        && previousDisplayedLayout.plotHeight === layout.plotHeight
+        && animate;
 
       if (!shouldAnimate) {
         drawMinimalModeFrame(ctx, width, height, layout, themeColors, nextProjectedFrame);
         container._minimalModeLogicalFrame = nextLogicalFrame;
+        container._minimalModeLayout = layout;
+        container._minimalModeDisplayedLogicalFrame = nextLogicalFrame;
+        container._minimalModeDisplayedProjectedFrame = nextProjectedFrame;
+        container._minimalModeDisplayedLayout = layout;
         return;
       }
 
-      const previousProjectedFrame = projectMinimalModeFrameToCanvas(
-        previousLogicalFrame,
-        layout.xToCanvas,
-        layout.yToCanvas,
+      drawMinimalModeFrame(
+        ctx,
+        width,
+        height,
+        previousDisplayedLayout,
+        themeColors,
+        previousDisplayedProjectedFrame,
       );
-      drawMinimalModeFrame(ctx, width, height, layout, themeColors, previousProjectedFrame);
-      const durationMs = 180;
+      const durationMs = minimalModeAnimationDurationMs;
       const animationStartedAtMs = performance.now();
 
       const step = (nowMs) => {
         const progress = Math.min(1, (nowMs - animationStartedAtMs) / durationMs);
         const easedProgress = 1 - ((1 - progress) ** 3);
         const pointCount = nextProjectedFrame.x.length;
+        const interpolatedChartMinY =
+          previousDisplayedLayout.chartMinY
+          + (layout.chartMinY - previousDisplayedLayout.chartMinY) * easedProgress;
+        const interpolatedChartMaxY =
+          previousDisplayedLayout.chartMaxY
+          + (layout.chartMaxY - previousDisplayedLayout.chartMaxY) * easedProgress;
+        const animatedLayout = buildMinimalModeAnimatedLayout(
+          layout,
+          interpolatedChartMinY,
+          interpolatedChartMaxY,
+        );
         const interpolatedFrame = {
           x: new Float32Array(pointCount),
           centerY: new Float32Array(pointCount),
@@ -2239,30 +2549,64 @@
 
         for (let pointIndex = 0; pointIndex < pointCount; pointIndex += 1) {
           interpolatedFrame.x[pointIndex] =
-            previousProjectedFrame.x[pointIndex]
-            + (nextProjectedFrame.x[pointIndex] - previousProjectedFrame.x[pointIndex]) * easedProgress;
+            previousDisplayedProjectedFrame.x[pointIndex]
+            + (nextProjectedFrame.x[pointIndex] - previousDisplayedProjectedFrame.x[pointIndex]) * easedProgress;
           interpolatedFrame.centerY[pointIndex] =
-            previousProjectedFrame.centerY[pointIndex]
-            + (nextProjectedFrame.centerY[pointIndex] - previousProjectedFrame.centerY[pointIndex]) * easedProgress;
+            animatedLayout.yToCanvas(
+              previousDisplayedLogicalFrame.centerElos[pointIndex]
+              + (nextLogicalFrame.centerElos[pointIndex] - previousDisplayedLogicalFrame.centerElos[pointIndex]) * easedProgress,
+            );
           interpolatedFrame.lowerY[pointIndex] =
-            previousProjectedFrame.lowerY[pointIndex]
-            + (nextProjectedFrame.lowerY[pointIndex] - previousProjectedFrame.lowerY[pointIndex]) * easedProgress;
+            animatedLayout.yToCanvas(
+              previousDisplayedLogicalFrame.lowerElos[pointIndex]
+              + (nextLogicalFrame.lowerElos[pointIndex] - previousDisplayedLogicalFrame.lowerElos[pointIndex]) * easedProgress,
+            );
           interpolatedFrame.upperY[pointIndex] =
-            previousProjectedFrame.upperY[pointIndex]
-            + (nextProjectedFrame.upperY[pointIndex] - previousProjectedFrame.upperY[pointIndex]) * easedProgress;
+            animatedLayout.yToCanvas(
+              previousDisplayedLogicalFrame.upperElos[pointIndex]
+              + (nextLogicalFrame.upperElos[pointIndex] - previousDisplayedLogicalFrame.upperElos[pointIndex]) * easedProgress,
+            );
           interpolatedFrame.whiskerLowerY[pointIndex] =
-            previousProjectedFrame.whiskerLowerY[pointIndex]
-            + (nextProjectedFrame.whiskerLowerY[pointIndex] - previousProjectedFrame.whiskerLowerY[pointIndex]) * easedProgress;
+            animatedLayout.yToCanvas(
+              previousDisplayedLogicalFrame.whiskerLowerElos[pointIndex]
+              + (nextLogicalFrame.whiskerLowerElos[pointIndex] - previousDisplayedLogicalFrame.whiskerLowerElos[pointIndex]) * easedProgress,
+            );
           interpolatedFrame.whiskerUpperY[pointIndex] =
-            previousProjectedFrame.whiskerUpperY[pointIndex]
-            + (nextProjectedFrame.whiskerUpperY[pointIndex] - previousProjectedFrame.whiskerUpperY[pointIndex]) * easedProgress;
+            animatedLayout.yToCanvas(
+              previousDisplayedLogicalFrame.whiskerUpperElos[pointIndex]
+              + (nextLogicalFrame.whiskerUpperElos[pointIndex] - previousDisplayedLogicalFrame.whiskerUpperElos[pointIndex]) * easedProgress,
+            );
         }
 
-        drawMinimalModeFrame(ctx, width, height, layout, themeColors, interpolatedFrame);
+        drawMinimalModeFrame(ctx, width, height, animatedLayout, themeColors, interpolatedFrame);
+        container._minimalModeDisplayedProjectedFrame = interpolatedFrame;
+        container._minimalModeDisplayedLogicalFrame = {
+          iterations: nextLogicalFrame.iterations,
+          centerElos: Array.from({ length: pointCount }, (_, pointIndex) =>
+            previousDisplayedLogicalFrame.centerElos[pointIndex]
+            + (nextLogicalFrame.centerElos[pointIndex] - previousDisplayedLogicalFrame.centerElos[pointIndex]) * easedProgress),
+          lowerElos: Array.from({ length: pointCount }, (_, pointIndex) =>
+            previousDisplayedLogicalFrame.lowerElos[pointIndex]
+            + (nextLogicalFrame.lowerElos[pointIndex] - previousDisplayedLogicalFrame.lowerElos[pointIndex]) * easedProgress),
+          upperElos: Array.from({ length: pointCount }, (_, pointIndex) =>
+            previousDisplayedLogicalFrame.upperElos[pointIndex]
+            + (nextLogicalFrame.upperElos[pointIndex] - previousDisplayedLogicalFrame.upperElos[pointIndex]) * easedProgress),
+          whiskerLowerElos: Array.from({ length: pointCount }, (_, pointIndex) =>
+            previousDisplayedLogicalFrame.whiskerLowerElos[pointIndex]
+            + (nextLogicalFrame.whiskerLowerElos[pointIndex] - previousDisplayedLogicalFrame.whiskerLowerElos[pointIndex]) * easedProgress),
+          whiskerUpperElos: Array.from({ length: pointCount }, (_, pointIndex) =>
+            previousDisplayedLogicalFrame.whiskerUpperElos[pointIndex]
+            + (nextLogicalFrame.whiskerUpperElos[pointIndex] - previousDisplayedLogicalFrame.whiskerUpperElos[pointIndex]) * easedProgress),
+        };
+        container._minimalModeDisplayedLayout = animatedLayout;
 
         if (progress >= 1) {
           container._minimalAnimationFrame = null;
           container._minimalModeLogicalFrame = nextLogicalFrame;
+          container._minimalModeLayout = layout;
+          container._minimalModeDisplayedLogicalFrame = nextLogicalFrame;
+          container._minimalModeDisplayedProjectedFrame = nextProjectedFrame;
+          container._minimalModeDisplayedLayout = layout;
           return;
         }
 
@@ -2271,6 +2615,7 @@
 
       container._minimalAnimationFrame = window.requestAnimationFrame(step);
       container._minimalModeLogicalFrame = nextLogicalFrame;
+      container._minimalModeLayout = layout;
     }
 
     function ensureChartElements(container, { useWorker = false } = {}) {
@@ -2314,6 +2659,10 @@
       container._chartPendingWorkerPayload = null;
       container._minimalAnimationFrame = null;
       container._minimalModeLogicalFrame = null;
+      container._minimalModeLayout = null;
+      container._minimalModeDisplayedLogicalFrame = null;
+      container._minimalModeDisplayedProjectedFrame = null;
+      container._minimalModeDisplayedLayout = null;
 
       if (useWorker && supportsChartWorker) {
         try {
@@ -2404,7 +2753,7 @@
       container._chartWorker.postMessage(payload);
     }
 
-    function renderLineChart(container, snapshot) {
+    function renderLineChart(container, snapshot, { animateChart = true } = {}) {
       const renderModel = buildChartRenderModel(snapshot);
       const lineIterations = renderModel?.lineIterations ?? [];
       const lineElos = renderModel?.lineElos ?? [];
@@ -2424,6 +2773,10 @@
         container._chartWorkerBusy = false;
         container._chartPendingWorkerPayload = null;
         container._minimalModeLogicalFrame = null;
+        container._minimalModeLayout = null;
+        container._minimalModeDisplayedLogicalFrame = null;
+        container._minimalModeDisplayedProjectedFrame = null;
+        container._minimalModeDisplayedLayout = null;
         container._chartData = null;
         container._chartPointIndexByIteration = new Map();
         if (container._chartOverlay) {
@@ -2486,6 +2839,7 @@
           layout,
           themeColors,
           renderModel,
+          { animate: animateChart },
         );
         restoreHoveredTooltip(container, tooltip);
         return;
@@ -2797,9 +3151,9 @@
       restoreHoveredTooltip(container, tooltip);
     }
 
-    function renderChartState(container, chartState) {
+    function renderChartState(container, chartState, { animateChart = true } = {}) {
       displayedChartState = chartState;
-      renderLineChart(container, chartState);
+      renderLineChart(container, chartState, { animateChart });
     }
 
     function syncTimeline(snapshot) {
@@ -2887,17 +3241,58 @@
       updateTrackedCheckpointCard(snapshot);
     }
 
-    function updateChart(snapshot) {
+    function updateChart(snapshot, { animateChart = true } = {}) {
       const chart = document.getElementById("elo-chart");
       if (!snapshot) {
         displayedChartState = null;
         lastChartSignature = null;
         chart.className = "empty";
-        chart.textContent = "No Elo data yet.";
+        chart.textContent = currentSummary === null
+          ? "Loading live summary..."
+          : Number(currentSummary?.num_models ?? 0) > 0
+            ? "Loading chart data..."
+            : "No Elo data yet.";
         return;
       }
 
-      renderChartState(chart, snapshot);
+      renderChartState(chart, snapshot, { animateChart });
+    }
+
+    function showInitialChartStatus(message) {
+      if (displayedChartState) {
+        return;
+      }
+
+      const chart = document.getElementById("elo-chart");
+      chart.className = "empty";
+      chart.textContent = message;
+    }
+
+    function showInitialLiveChartLoadingProgress({
+      loadedCount = 0,
+      totalCount = 0,
+      preparing = false,
+    } = {}) {
+      if (displayedChartState) {
+        return;
+      }
+
+      const normalizedTotalCount = Number(totalCount);
+      if (!Number.isFinite(normalizedTotalCount) || normalizedTotalCount <= 0) {
+        return;
+      }
+
+      const chart = document.getElementById("elo-chart");
+      chart.className = "empty";
+
+      const normalizedLoadedCount = preparing
+        ? normalizedTotalCount
+        : Math.min(
+          normalizedTotalCount,
+          Math.max(0, Math.round(Number(loadedCount) || 0)),
+        );
+
+      chart.textContent = `Loading checkpoints... ${formatInteger(normalizedLoadedCount)} / ${formatInteger(normalizedTotalCount)}`;
     }
 
     function sleep(ms) {
@@ -2906,8 +3301,62 @@
       });
     }
 
-    async function readJsonResponse(response, label) {
-      const responseText = await response.text();
+    function nextPaint() {
+      return new Promise((resolve) => {
+        window.requestAnimationFrame(() => {
+          resolve();
+        });
+      });
+    }
+
+    async function readJsonResponse(response, label, { onProgress = null, onBeforeParse = null } = {}) {
+      let responseText;
+
+      if (typeof onProgress === "function" && response.body?.getReader) {
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        const textChunks = [];
+        const totalBytesHeader = Number(response.headers.get("Content-Length"));
+        const totalBytes = Number.isFinite(totalBytesHeader) && totalBytesHeader > 0
+          ? totalBytesHeader
+          : null;
+        let receivedBytes = 0;
+
+        onProgress({
+          receivedBytes,
+          totalBytes,
+          preparing: false,
+        });
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) {
+            break;
+          }
+
+          receivedBytes += value.byteLength;
+          textChunks.push(decoder.decode(value, { stream: true }));
+          onProgress({
+            receivedBytes,
+            totalBytes,
+            preparing: false,
+          });
+        }
+
+        textChunks.push(decoder.decode());
+        responseText = textChunks.join("");
+        onProgress({
+          receivedBytes,
+          totalBytes,
+          preparing: true,
+        });
+      } else {
+        responseText = await response.text();
+      }
+
+      if (typeof onBeforeParse === "function") {
+        await onBeforeParse();
+      }
 
       try {
         return JSON.parse(responseText);
@@ -2922,11 +3371,16 @@
 
     async function fetchJson(url, label, options = {}) {
       let lastParseError = null;
+      const {
+        onProgress = null,
+        onBeforeParse = null,
+        ...fetchOptions
+      } = options;
 
       for (let attemptIndex = 0; attemptIndex < 2; attemptIndex += 1) {
         const response = await fetch(url, {
           cache: "no-store",
-          ...options,
+          ...fetchOptions,
         });
 
         if (!response.ok) {
@@ -2934,7 +3388,7 @@
         }
 
         try {
-          return await readJsonResponse(response, label);
+          return await readJsonResponse(response, label, { onProgress, onBeforeParse });
         } catch (error) {
           lastParseError = error;
 
@@ -2958,9 +3412,52 @@
     }
 
     async function pollLiveChart() {
-      currentChartSnapshot = await fetchJson("/api/elo-live-chart", "live chart");
+      const totalCheckpointCount = Number(
+        currentSummary?.num_models ?? currentChartSnapshot?.num_models ?? 0,
+      );
+      const isInitialChartLoad = !displayedChartState && totalCheckpointCount > 0;
+
+      if (isInitialChartLoad) {
+        showInitialLiveChartLoadingProgress({
+          loadedCount: 0,
+          totalCount: totalCheckpointCount,
+        });
+      }
+
+      currentChartSnapshot = await fetchJson("/api/elo-live-chart", "live chart", {
+        onBeforeParse: async () => {
+          if (!isInitialChartLoad) {
+            return;
+          }
+
+          showInitialChartStatus("Parsing chart data...");
+          await nextPaint();
+        },
+        onProgress: ({ receivedBytes, totalBytes, preparing }) => {
+          if (!isInitialChartLoad || totalCheckpointCount <= 0) {
+            return;
+          }
+
+          const loadedCount = totalBytes && totalBytes > 0
+            ? (receivedBytes / totalBytes) * totalCheckpointCount
+            : preparing
+              ? totalCheckpointCount
+              : 0;
+
+          showInitialLiveChartLoadingProgress({
+            loadedCount,
+            totalCount: totalCheckpointCount,
+            preparing,
+          });
+        },
+      });
       currentChartVersion = Number(currentChartSnapshot?.chart_version ?? -1);
       lastLiveChartFetchAtMs = Date.now();
+
+      if (isInitialChartLoad) {
+        showInitialChartStatus("Preparing chart...");
+        await nextPaint();
+      }
     }
 
     function getLiveChartRefreshIntervalMs() {
@@ -2977,11 +3474,19 @@
     }
 
     function shouldFetchLiveChart(nowMs = Date.now(), { force = false } = {}) {
-      if (isReplayActive() || !followLatestCheckbox.checked) {
+      if (isReplayActive()) {
         return false;
       }
 
       if (!currentSummary || (currentSummary.num_models ?? 0) <= 0) {
+        return false;
+      }
+
+      if (!currentChartSnapshot) {
+        return true;
+      }
+
+      if (!followLatestCheckbox.checked) {
         return false;
       }
 
@@ -3080,6 +3585,10 @@
       }
     }
 
+    function commitWorkerSliderValue() {
+      void submitWorkerCount(Number(workerCountSlider.value));
+    }
+
     function renderDisplayedSnapshot({ animateChart = true, force = false } = {}) {
       const statsSnapshot = getDisplayedStatsSnapshot();
       const chartSnapshot = getDisplayedChartSnapshot();
@@ -3100,20 +3609,33 @@
 
       if (shouldUpdateChart) {
         lastChartSignature = chartSignature;
-        updateChart(chartSnapshot);
+        updateChart(chartSnapshot, { animateChart });
       }
     }
 
     async function loop() {
       try {
+        if (currentSummary === null && !displayedChartState) {
+          showInitialChartStatus("Loading live summary...");
+        }
+
         await pollSummary();
+
+        if (!displayedChartState && Number(currentSummary?.num_models ?? 0) > 0 && !currentChartSnapshot) {
+          showInitialLiveChartLoadingProgress({
+            loadedCount: 0,
+            totalCount: Number(currentSummary?.num_models ?? 0),
+          });
+        }
+
         if (shouldFetchLiveChart()) {
           await pollLiveChart();
         }
+        renderDisplayedSnapshot();
         if (shouldPollHistory()) {
           await pollHistory();
+          renderDisplayedSnapshot({ animateChart: false });
         }
-        renderDisplayedSnapshot();
       } catch (error) {
         console.error(error);
         if (!displayedChartState) {
@@ -3160,7 +3682,7 @@
 
       if (isReplayActive()) {
         replayStartedAtMs = performance.now();
-        replayStartedIndex = selectedHistoryIndex;
+        replayStartedIndex = replayPosition >= 0 ? replayPosition : selectedHistoryIndex;
       }
     });
 
@@ -3188,8 +3710,19 @@
       updateWorkerCountCard();
     });
 
+    workerCountSlider.addEventListener("pointerdown", () => {
+      isWorkerSliderPointerDown = true;
+    });
+
     workerCountSlider.addEventListener("change", () => {
-      void submitWorkerCount(Number(workerCountSlider.value));
+      if (suppressNextWorkerSliderChange) {
+        suppressNextWorkerSliderChange = false;
+        return;
+      }
+
+      if (!isWorkerSliderPointerDown) {
+        commitWorkerSliderValue();
+      }
     });
 
     movingAverageWindowSlider.addEventListener("input", () => {
@@ -3217,6 +3750,21 @@
     window.addEventListener("blur", () => {
       lastMouseClientPointer = null;
       clearHoveredState();
+    });
+
+    window.addEventListener("pointerup", () => {
+      if (!isWorkerSliderPointerDown) {
+        return;
+      }
+
+      isWorkerSliderPointerDown = false;
+      suppressNextWorkerSliderChange = true;
+      commitWorkerSliderValue();
+    });
+
+    window.addEventListener("pointercancel", () => {
+      isWorkerSliderPointerDown = false;
+      suppressNextWorkerSliderChange = false;
     });
 
     document.addEventListener("mouseleave", () => {

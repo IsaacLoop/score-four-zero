@@ -3,7 +3,6 @@ Entirely vibe-coded file (gpt-5.4). Dashboard plumbing is too much of a pain to 
 """
 
 import argparse
-import copy
 import json
 import threading
 import time
@@ -25,10 +24,12 @@ from .elo_parallel import (
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CHECKPOINT_DIR = PROJECT_ROOT / "checkpoints"
+DEFAULT_RESUME_STATE_PATH = PROJECT_ROOT / "artifacts" / "elo_tracker_resume_state.json"
 DASHBOARD_HTML_PATH = PROJECT_ROOT / "dashboard" / "elo_tracker_dashboard.html"
 WORKER_JS_PATH = PROJECT_ROOT / "dashboard" / "elo_chart_worker.js"
 MIN_WORKERS = 1
 MAX_WORKERS = 24
+TRACKER_STATE_SCHEMA_VERSION = 1
 
 
 class LiveEloTracker:
@@ -37,6 +38,7 @@ class LiveEloTracker:
         self,
         checkpoint_dir: Path,
         *,
+        resume_state_path: Path = DEFAULT_RESUME_STATE_PATH,
         num_simulations: int = 25,
         max_workers: int = 6,
         c_puct: float = 1.5,
@@ -49,6 +51,7 @@ class LiveEloTracker:
         max_tasks_per_child: int = 100,
     ):
         self.checkpoint_dir = checkpoint_dir
+        self.resume_state_path = resume_state_path
         self.num_simulations = num_simulations
         self.requested_max_workers = self._normalize_max_workers(max_workers)
         self.active_max_workers = self.requested_max_workers
@@ -80,6 +83,17 @@ class LiveEloTracker:
             self._chart_snapshot
         )
 
+    def _resume_settings_snapshot(self):
+        return {
+            "checkpoint_dir": str(self.checkpoint_dir),
+            "num_simulations": int(self.num_simulations),
+            "c_puct": float(self.c_puct),
+            "elo_k": float(self.elo_k),
+            "matchup_distance_scale": float(self.matchup_distance_scale),
+            "matchup_min_weight": float(self.matchup_min_weight),
+            "snapshot_interval_matches": int(self.snapshot_interval_matches),
+        }
+
     @staticmethod
     def _normalize_max_workers(max_workers: int) -> int:
         normalized_workers = int(max_workers)
@@ -92,21 +106,121 @@ class LiveEloTracker:
     def stop(self):
         self._stop_event.set()
 
-    def get_snapshot(self):
+    def delete_resume_state(self):
+        try:
+            self.resume_state_path.unlink()
+        except FileNotFoundError:
+            return
+
+    def try_resume_previous_run(self):
+        try:
+            state = json.loads(self.resume_state_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return False, "no saved tracker state"
+        except (OSError, json.JSONDecodeError):
+            self.delete_resume_state()
+            return False, "saved tracker state could not be read"
+
+        is_valid, reason, normalized_model_paths = self._validate_resume_state(state)
+        if not is_valid:
+            self.delete_resume_state()
+            return False, reason
+
         with self._lock:
-            return dict(self._summary_snapshot)
+            self.model_paths = normalized_model_paths
+            self.elos = [float(elo) for elo in state["elos"]]
+            self.fight_counts = [int(count) for count in state["fight_counts"]]
+            self._known_model_paths = set(self.model_paths)
+            self.total_matches = int(state["total_matches"])
+            self.started_at = state.get("started_at") or self.started_at
+            self.last_update_at = state.get("last_update_at")
+            self.snapshot_history = list(state.get("snapshot_history", []))
+            self._chart_version = int(state.get("chart_version", 0))
+
+            next_snapshot_match_count = int(
+                state.get(
+                    "next_snapshot_match_count",
+                    self.snapshot_interval_matches,
+                )
+            )
+            while next_snapshot_match_count <= self.total_matches:
+                next_snapshot_match_count += self.snapshot_interval_matches
+            self._next_snapshot_match_count = next_snapshot_match_count
+            self._refresh_metadata_unlocked()
+
+        return True, "resumed previous tracker state"
+
+    def _validate_resume_state(self, state):
+        if not isinstance(state, dict):
+            return False, "saved tracker state is malformed", []
+
+        if state.get("schema_version") != TRACKER_STATE_SCHEMA_VERSION:
+            return False, "saved tracker state schema changed", []
+
+        if state.get("settings") != self._resume_settings_snapshot():
+            return False, "tracker settings changed since the saved run", []
+
+        model_paths = state.get("model_paths")
+        elos = state.get("elos")
+        fight_counts = state.get("fight_counts")
+        snapshot_history = state.get("snapshot_history", [])
+
+        if not isinstance(model_paths, list):
+            return False, "saved tracker state has invalid model paths", []
+        if not isinstance(elos, list) or not isinstance(fight_counts, list):
+            return False, "saved tracker state has invalid rating data", []
+        if len(model_paths) != len(elos) or len(model_paths) != len(fight_counts):
+            return False, "saved tracker state has inconsistent array lengths", []
+        if not isinstance(snapshot_history, list):
+            return False, "saved tracker history is malformed", []
+
+        normalized_model_paths = [str(Path(path).resolve()) for path in model_paths]
+        current_paths = [str(path.resolve()) for path in self._checkpoint_paths()]
+
+        if current_paths[: len(normalized_model_paths)] != normalized_model_paths:
+            return False, "checkpoint set changed since the saved run", []
+
+        return True, None, normalized_model_paths
+
+    def _build_persisted_state_unlocked(self):
+        return {
+            "schema_version": TRACKER_STATE_SCHEMA_VERSION,
+            "settings": self._resume_settings_snapshot(),
+            "started_at": self.started_at,
+            "last_update_at": self.last_update_at,
+            "total_matches": int(self.total_matches),
+            "next_snapshot_match_count": int(self._next_snapshot_match_count),
+            "chart_version": int(self._chart_version),
+            "model_paths": list(self.model_paths),
+            "elos": [float(elo) for elo in self.elos],
+            "fight_counts": [int(count) for count in self.fight_counts],
+            "snapshot_history": list(self.snapshot_history),
+        }
+
+    def _persist_resume_state(self):
+        with self._lock:
+            state = self._build_persisted_state_unlocked()
+
+        self.resume_state_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_state_path = self.resume_state_path.with_suffix(
+            self.resume_state_path.suffix + ".tmp"
+        )
+        temp_state_path.write_text(
+            json.dumps(state, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        temp_state_path.replace(self.resume_state_path)
+
+    def get_snapshot(self):
+        return dict(self._summary_snapshot)
 
     def get_chart_snapshot(self):
-        with self._lock:
-            return dict(self._chart_snapshot)
+        return dict(self._chart_snapshot)
 
     def get_history(self, after: int = -1):
         with self._lock:
             return {
-                "snapshots": [
-                    copy.deepcopy(snapshot)
-                    for snapshot in self.snapshot_history[after + 1 :]
-                ],
+                "snapshots": list(self.snapshot_history[after + 1 :]),
                 "total_snapshots": len(self.snapshot_history),
             }
 
@@ -166,6 +280,7 @@ class LiveEloTracker:
                     time.sleep(self.idle_sleep_s)
                     continue
         finally:
+            self._persist_resume_state()
             if fight_pool is not None:
                 fight_pool.close()
 
@@ -276,6 +391,7 @@ class LiveEloTracker:
     def _discover_new_models(self):
         new_models = []
         current_time = time.time()
+        should_persist = False
 
         for checkpoint_path in self._checkpoint_paths():
             try:
@@ -298,8 +414,12 @@ class LiveEloTracker:
                 self.fight_counts.append(0)
                 self.last_update_at = datetime.now(timezone.utc).isoformat()
                 self._refresh_snapshots_unlocked()
+                should_persist = True
 
             new_models.append((checkpoint_iteration(normalized_path), initial_elo))
+
+        if should_persist:
+            self._persist_resume_state()
 
         return new_models
 
@@ -330,6 +450,7 @@ class LiveEloTracker:
 
     def _apply_single_result(self, sample, result):
         idx1, idx2, swapped = sample
+        should_persist = False
 
         with self._lock:
             normalized_result = remap_fight_result(result, swapped)
@@ -346,8 +467,12 @@ class LiveEloTracker:
             self.last_update_at = datetime.now(timezone.utc).isoformat()
             self._refresh_snapshots_unlocked()
             while self.total_matches >= self._next_snapshot_match_count:
-                self.snapshot_history.append(copy.deepcopy(self._chart_snapshot))
+                self.snapshot_history.append(self._chart_snapshot)
                 self._next_snapshot_match_count += self.snapshot_interval_matches
+                should_persist = True
+
+        if should_persist:
+            self._persist_resume_state()
 
 
 def make_handler(tracker: LiveEloTracker):
@@ -471,6 +596,11 @@ def main():
     parser.add_argument("--snapshot-interval-matches", type=int, default=10)
     parser.add_argument("--checkpoint-stable-age-s", type=float, default=2.0)
     parser.add_argument("--idle-sleep-s", type=float, default=1.0)
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume the previous tracker run if the saved state still matches the checkpoint set and settings.",
+    )
     args = parser.parse_args()
 
     if args.snapshot_interval_matches <= 0:
@@ -482,6 +612,7 @@ def main():
 
     tracker = LiveEloTracker(
         checkpoint_dir=args.checkpoint_dir.resolve(),
+        resume_state_path=DEFAULT_RESUME_STATE_PATH,
         num_simulations=args.num_simulations,
         max_workers=args.workers,
         c_puct=args.c_puct,
@@ -492,6 +623,16 @@ def main():
         checkpoint_stable_age_s=args.checkpoint_stable_age_s,
         idle_sleep_s=args.idle_sleep_s,
     )
+
+    if not args.resume:
+        tracker.delete_resume_state()
+    else:
+        resumed, resume_message = tracker.try_resume_previous_run()
+        if resumed:
+            print("Resumed previous live Elo tracker state.")
+        else:
+            print(f"Starting fresh tracker state: {resume_message}.")
+
     server = ThreadingHTTPServer(
         (args.host, args.port),
         make_handler(tracker),

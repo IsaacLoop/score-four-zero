@@ -37,8 +37,11 @@ def learning_rate_at_step(
     return peak_lr + (final_lr - peak_lr) * progress
 
 
-def train(delete_existing_checkpoints: bool = False):
-    NUM_ITERATIONS = 5000
+def train(
+    delete_existing_checkpoints: bool = False,
+    num_iterations: int = 20_000,
+):
+    NUM_ITERATIONS = num_iterations
     GAMES_PER_ITERATION = 32
     TRAIN_STEPS_PER_ITERATION = 128
     BATCH_SIZE = 128
@@ -50,6 +53,9 @@ def train(delete_existing_checkpoints: bool = False):
     DIRICHLET_EPSILON = 0.25
     LEARNING_RATE = 3e-4
     FINAL_LEARNING_RATE = 3e-5
+    LR_HOLD_FRACTION = 0.20
+    LR_DECAY_END_FRACTION = 0.95
+    CHECKPOINT_EVERY_ITERATIONS = 10
     WEIGHT_DECAY = 1e-4
     MAX_GRAD_NORM = 1.0
     NUM_SAMPLING_MOVES = 8
@@ -140,6 +146,8 @@ def train(delete_existing_checkpoints: bool = False):
                 total_steps=total_train_steps,
                 peak_lr=LEARNING_RATE,
                 final_lr=FINAL_LEARNING_RATE,
+                hold_fraction=LR_HOLD_FRACTION,
+                decay_end_fraction=LR_DECAY_END_FRACTION,
             )
             iteration_bar.set_postfix({"lr": f"{current_lr:.4e}"})
             for param_group in optimizer.param_groups:
@@ -168,14 +176,15 @@ def train(delete_existing_checkpoints: bool = False):
             global_train_step += 1
 
         # 3 - Checkpointing
-        checkpoint_path = CHECKPOINT_DIR / f"iteration_{iteration}.pt"
-        torch.save(
-            {
-                "iteration": iteration + 1,
-                "model_state_dict": model.state_dict(),
-            },
-            checkpoint_path,
-        )
+        if iteration % CHECKPOINT_EVERY_ITERATIONS == 0:
+            checkpoint_path = CHECKPOINT_DIR / f"iteration_{iteration}.pt"
+            torch.save(
+                {
+                    "iteration": iteration + 1,
+                    "model_state_dict": model.state_dict(),
+                },
+                checkpoint_path,
+            )
 
     self_play_pool.close()
 
@@ -183,9 +192,18 @@ def train(delete_existing_checkpoints: bool = False):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train the Score Four Zero model.")
     parser.add_argument(
+        "--num-iterations",
+        type=int,
+        default=20_000,
+        help="Number of training iterations to run. Default: 20000.",
+    )
+    parser.add_argument(
         "--delete-existing-checkpoints",
         action="store_true",
         help="Delete existing iteration_*.pt checkpoints before training starts.",
     )
     args = parser.parse_args()
-    train(delete_existing_checkpoints=args.delete_existing_checkpoints)
+    train(
+        delete_existing_checkpoints=args.delete_existing_checkpoints,
+        num_iterations=args.num_iterations,
+    )
