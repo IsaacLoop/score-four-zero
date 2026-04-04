@@ -32,6 +32,16 @@ Optional and mutually exclusive flags are:
 - `--resume`: resume training from the latest checkpoint (as long as it appears that the previous run was made with the same training hyperparameters as the ones currently set in the code)
 - `--delete-existing-checkpoints`: delete all existing checkpoints before starting training
 
+During training, you can monitor metrics such as the losses, the learning rate, the memory size, etc.with TensorBoard.
+
+In your environment, run:
+
+```bash
+tensorboard --logdir tb_logs
+```
+
+and open the provided local URL in your browser.
+
 ## Evaluating the agent
 
 The evaluation script is `src/evaluate_CLI.py`. In the environment, you start an evaluation run with:
