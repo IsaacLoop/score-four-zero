@@ -1,0 +1,9 @@
+matplotlib
+numpy
+tqdm
+pandas
+ipykernel
+scikit-learn
+tensorboard
+
+-e .

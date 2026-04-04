@@ -1,10 +1,12 @@
 import argparse
 import os
+import shutil
 from pathlib import Path
 
 import torch
 from torch.nn.functional import mse_loss
 from torch.optim import AdamW
+from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from .elo_history import checkpoint_iteration
@@ -71,6 +73,7 @@ def train(
     NUM_SAMPLING_MOVES = 8
     N_PARALLEL_WORKERS = min(20, GAMES_PER_ITERATION, os.cpu_count() or 1)
     SELF_PLAY_WORKER_MAX_TASKS = 1000
+    TENSORBOARD_DIR = Path("tb_logs")
 
     CHECKPOINT_DIR = Path("checkpoints")
     TRAINING_CONFIG = {
@@ -95,6 +98,8 @@ def train(
     if delete_existing_checkpoints:
         for checkpoint_path in CHECKPOINT_DIR.glob("iteration_*.pt"):
             checkpoint_path.unlink()
+    if TENSORBOARD_DIR.exists() and not resume:
+        shutil.rmtree(TENSORBOARD_DIR)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device} " + ("🥰" if device.type == "cuda" else "😢"))
@@ -106,6 +111,7 @@ def train(
         weight_decay=WEIGHT_DECAY,
     )
     replay_buffer = ReplayBuffer(capacity=REPLAY_BUFFER_SIZE)
+    writer = SummaryWriter(TENSORBOARD_DIR)
     self_play_pool = ParallelSelfPlayPool(
         max_workers=N_PARALLEL_WORKERS,
         num_simulations=NUM_SIMULATIONS_TRAINING,
@@ -252,6 +258,24 @@ def train(
             optimizer.step()
             global_train_step += 1
 
+            writer.add_scalar("t/loss_total", float(loss.item()), global_train_step)
+            writer.add_scalar(
+                "t/loss_policy",
+                float(policy_loss.item()),
+                global_train_step,
+            )
+            writer.add_scalar(
+                "t/loss_value",
+                float(value_loss.item()),
+                global_train_step,
+            )
+            writer.add_scalar("t/lr", float(current_lr), global_train_step)
+            writer.add_scalar(
+                "t/replay_buffer_size",
+                float(len(replay_buffer)),
+                global_train_step,
+            )
+
         # 3 - Saving checkpoints
         if iteration % CHECKPOINT_EVERY_ITERATIONS == 0:
             checkpoint_path = CHECKPOINT_DIR / f"iteration_{iteration}.pt"
@@ -267,6 +291,7 @@ def train(
             )
 
     self_play_pool.close()
+    writer.close()
 
 
 if __name__ == "__main__":
