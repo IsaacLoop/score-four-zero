@@ -48,6 +48,10 @@ def latest_checkpoint_path(checkpoint_dir: Path):
     return max(checkpoint_paths, key=checkpoint_iteration)
 
 
+def format_learning_rate(value: float):
+    return f"{value:.0e}".replace("e-0", "e-").replace("e+0", "e+")
+
+
 def train(
     delete_existing_checkpoints: bool = False,
     num_iterations: int = 20_000,
@@ -102,9 +106,10 @@ def train(
         shutil.rmtree(TENSORBOARD_DIR)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device} " + ("🥰" if device.type == "cuda" else "😢"))
-
     model = PolicyValueModel().to(device)
+    trainable_parameters = sum(
+        parameter.numel() for parameter in model.parameters() if parameter.requires_grad
+    )
     optimizer = AdamW(
         model.parameters(),
         lr=LEARNING_RATE,
@@ -161,9 +166,6 @@ def train(
                     start_iteration * TRAIN_STEPS_PER_ITERATION,
                 )
             )
-            print(
-                f"Resuming from {checkpoint_path.name} at iteration {start_iteration}."
-            )
 
     current_lr = learning_rate_at_step(
         step=global_train_step,
@@ -175,6 +177,25 @@ def train(
     )
     for param_group in optimizer.param_groups:
         param_group["lr"] = current_lr
+
+    hold_iteration = int(NUM_ITERATIONS * LR_HOLD_FRACTION)
+    decay_end_iteration = int(NUM_ITERATIONS * LR_DECAY_END_FRACTION)
+    print("- Device: " + ("Cuda 🥰" if device.type == "cuda" else "CPU 🥹"))
+    print(f"- Trainable parameters: {trainable_parameters:,}")
+    print(f"- Self-play workers: {N_PARALLEL_WORKERS:,}")
+    print(f"- Total iterations: {NUM_ITERATIONS:,}")
+    print(
+        "- LR schedule: "
+        f"{format_learning_rate(LEARNING_RATE)} until iteration {hold_iteration:,}, "
+        f"then linear decay to {format_learning_rate(FINAL_LEARNING_RATE)} "
+        f"until iteration {decay_end_iteration:,}"
+    )
+    if start_iteration > 0:
+        print(
+            "- Resuming from a previous run, "
+            f"starting from iteration {start_iteration:,}"
+        )
+    print()
 
     iteration_bar = tqdm(
         range(start_iteration, NUM_ITERATIONS),
