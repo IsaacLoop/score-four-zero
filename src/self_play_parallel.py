@@ -53,6 +53,7 @@ def play_one_self_play_game(
 
     return examples
 
+# Everything below is about the parallelism, which is a vibe-coded optimization feature.
 
 def _split_games_across_workers(total_games: int, num_workers: int):
     num_workers = max(1, min(total_games, num_workers))

@@ -1,5 +1,5 @@
 """
-Entirely vibe-coded file (gpt-5.4 xhigh reasoning). Parallelization is too much of a pain to do manually in 2026 for non-critical code lol
+Entirely vibe-coded file (gpt-5.4 xhigh reasoning).
 """
 
 from concurrent.futures import ProcessPoolExecutor, as_completed
