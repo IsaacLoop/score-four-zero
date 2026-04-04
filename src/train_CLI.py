@@ -7,6 +7,7 @@ from torch.nn.functional import mse_loss
 from torch.optim import AdamW
 from tqdm import tqdm
 
+from .elo_history import checkpoint_iteration
 from .PolicyValueModel import PolicyValueModel
 from .ReplayBuffer import ReplayBuffer
 from .self_play_parallel import ParallelSelfPlayPool
@@ -37,9 +38,18 @@ def learning_rate_at_step(
     return peak_lr + (final_lr - peak_lr) * progress
 
 
+def latest_checkpoint_path(checkpoint_dir: Path):
+    checkpoint_paths = list(checkpoint_dir.glob("iteration_*.pt"))
+    if not checkpoint_paths:
+        return None
+
+    return max(checkpoint_paths, key=checkpoint_iteration)
+
+
 def train(
     delete_existing_checkpoints: bool = False,
     num_iterations: int = 20_000,
+    resume: bool = False,
 ):
     NUM_ITERATIONS = num_iterations
     GAMES_PER_ITERATION = 32
@@ -63,6 +73,23 @@ def train(
     SELF_PLAY_WORKER_MAX_TASKS = 100
 
     CHECKPOINT_DIR = Path("checkpoints")
+    TRAINING_CONFIG = {
+        "games_per_iteration": GAMES_PER_ITERATION,
+        "train_steps_per_iteration": TRAIN_STEPS_PER_ITERATION,
+        "batch_size": BATCH_SIZE,
+        "replay_buffer_size": REPLAY_BUFFER_SIZE,
+        "num_simulations_training": NUM_SIMULATIONS_TRAINING,
+        "c_puct": C_PUCT,
+        "dirichlet_alpha": DIRICHLET_ALPHA,
+        "dirichlet_epsilon": DIRICHLET_EPSILON,
+        "learning_rate": LEARNING_RATE,
+        "final_learning_rate": FINAL_LEARNING_RATE,
+        "lr_hold_fraction": LR_HOLD_FRACTION,
+        "lr_decay_end_fraction": LR_DECAY_END_FRACTION,
+        "weight_decay": WEIGHT_DECAY,
+        "max_grad_norm": MAX_GRAD_NORM,
+        "num_sampling_moves": NUM_SAMPLING_MOVES,
+    }
 
     CHECKPOINT_DIR.mkdir(exist_ok=True)
     if delete_existing_checkpoints:
@@ -92,9 +119,59 @@ def train(
     total_train_steps = NUM_ITERATIONS * TRAIN_STEPS_PER_ITERATION
     global_train_step = 0
     current_lr = LEARNING_RATE
+    start_iteration = 0
+
+    if resume:
+        checkpoint_path = latest_checkpoint_path(CHECKPOINT_DIR)
+        if checkpoint_path is None:
+            print("No checkpoints found to resume from. Starting fresh.")
+        else:
+            checkpoint = torch.load(
+                checkpoint_path,
+                map_location=device,
+                weights_only=False,
+            )
+            checkpoint_training_config = checkpoint.get("training_config")
+            if checkpoint_training_config != TRAINING_CONFIG:
+                raise RuntimeError(
+                    "Latest checkpoint is not compatible with current training settings."
+                )
+
+            try:
+                model.load_state_dict(checkpoint["model_state_dict"])
+            except RuntimeError as e:
+                raise RuntimeError(
+                    "Latest checkpoint is not compatible with the current model architecture."
+                ) from e
+
+            optimizer_state_dict = checkpoint.get("optimizer_state_dict")
+            if optimizer_state_dict is not None:
+                optimizer.load_state_dict(optimizer_state_dict)
+
+            start_iteration = checkpoint_iteration(checkpoint_path) + 1
+            global_train_step = int(
+                checkpoint.get(
+                    "global_train_step",
+                    start_iteration * TRAIN_STEPS_PER_ITERATION,
+                )
+            )
+            print(
+                f"Resuming from {checkpoint_path.name} at iteration {start_iteration}."
+            )
+
+    current_lr = learning_rate_at_step(
+        step=global_train_step,
+        total_steps=total_train_steps,
+        peak_lr=LEARNING_RATE,
+        final_lr=FINAL_LEARNING_RATE,
+        hold_fraction=LR_HOLD_FRACTION,
+        decay_end_fraction=LR_DECAY_END_FRACTION,
+    )
+    for param_group in optimizer.param_groups:
+        param_group["lr"] = current_lr
 
     iteration_bar = tqdm(
-        range(NUM_ITERATIONS),
+        range(start_iteration, NUM_ITERATIONS),
         desc="Iterations",
         position=0,
     )
@@ -182,6 +259,9 @@ def train(
                 {
                     "iteration": iteration + 1,
                     "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "global_train_step": global_train_step,
+                    "training_config": TRAINING_CONFIG,
                 },
                 checkpoint_path,
             )
@@ -198,12 +278,22 @@ if __name__ == "__main__":
         help="Number of training iterations to run. Default: 20000.",
     )
     parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume from the highest compatible iteration_*.pt checkpoint.",
+    )
+    parser.add_argument(
         "--delete-existing-checkpoints",
         action="store_true",
         help="Delete existing iteration_*.pt checkpoints before training starts.",
     )
     args = parser.parse_args()
+    if args.resume and args.delete_existing_checkpoints:
+        parser.error(
+            "--resume and --delete-existing-checkpoints cannot be used together"
+        )
     train(
         delete_existing_checkpoints=args.delete_existing_checkpoints,
         num_iterations=args.num_iterations,
+        resume=args.resume,
     )
