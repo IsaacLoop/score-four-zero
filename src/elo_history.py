@@ -1,5 +1,5 @@
 """
-Entirely vibe-coded file (gpt-5). Tiny helper file, but rating snapshot glue is too boring to do manually in 2026 lol
+Entirely vibe-coded file (gpt-5.4). Tiny helper file, but rating snapshot glue is too boring to do manually in 2026 lol
 """
 
 from datetime import datetime, timezone

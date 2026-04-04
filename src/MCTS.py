@@ -138,7 +138,7 @@ class MCTS:
         for action, child in node.children.items():
             q = (
                 -child.value()
-            )  # minus because next move is from the PoV of the opponent
+            )  # minus because next move is from the PoV of the opponent. gonna happen a lot
 
             u = self.c_puct * child.prior * parent_visits_sqrt / (1 + child.visit_count)
 

@@ -69,8 +69,8 @@ def train(
     WEIGHT_DECAY = 1e-4
     MAX_GRAD_NORM = 1.0
     NUM_SAMPLING_MOVES = 8
-    N_PARALLEL_WORKERS = min(24, GAMES_PER_ITERATION, os.cpu_count() or 1)
-    SELF_PLAY_WORKER_MAX_TASKS = 100
+    N_PARALLEL_WORKERS = min(20, GAMES_PER_ITERATION, os.cpu_count() or 1)
+    SELF_PLAY_WORKER_MAX_TASKS = 1000
 
     CHECKPOINT_DIR = Path("checkpoints")
     TRAINING_CONFIG = {
@@ -252,7 +252,7 @@ def train(
             optimizer.step()
             global_train_step += 1
 
-        # 3 - Checkpointing
+        # 3 - Saving checkpoints
         if iteration % CHECKPOINT_EVERY_ITERATIONS == 0:
             checkpoint_path = CHECKPOINT_DIR / f"iteration_{iteration}.pt"
             torch.save(
