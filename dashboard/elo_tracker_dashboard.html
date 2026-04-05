@@ -750,6 +750,7 @@
 
   <script>
     const pollIntervalMs = 400;
+    const smoothSmallChartPollIntervalMs = 120;
     const historyPollIntervalMs = 2000;
     const checkpointInteractionRadiusPx = 44;
     const matchRateWindowMatches = 50;
@@ -759,6 +760,7 @@
     const minimalModeTargetPoints = 500;
     const minimalModeExtremaCount = 3;
     const minimalModeAnimationDurationMs = 180;
+    const normalModeAnimationDurationMs = 160;
     let movingAverageWindowSize = 15;
     let hoveredIteration = null;
     let hoveredPointer = null;
@@ -2308,6 +2310,21 @@
       };
     }
 
+    function buildAnimatedChartLayout(layout, chartMinY, chartMaxY) {
+      const yTicks = makeTicks(chartMinY, chartMaxY, 14);
+      const yToCanvas = (y) =>
+        layout.padding.top
+        + (1 - (y - chartMinY) / (chartMaxY - chartMinY)) * layout.plotHeight;
+
+      return {
+        ...layout,
+        chartMinY,
+        chartMaxY,
+        yTicks,
+        yToCanvas,
+      };
+    }
+
     function canAnimateMinimalModeTransition(previousFrame, nextFrame) {
       if (!previousFrame || !nextFrame) {
         return false;
@@ -2618,6 +2635,383 @@
       container._minimalModeLayout = layout;
     }
 
+    function stopNormalModeAnimation(container) {
+      if (container._normalModeAnimationFrame !== null) {
+        window.cancelAnimationFrame(container._normalModeAnimationFrame);
+        container._normalModeAnimationFrame = null;
+      }
+    }
+
+    function buildNormalModeLogicalFrame(renderModel) {
+      return {
+        iterations: Array.from(renderModel.lineIterations, (value) => Number(value)),
+        elos: Array.from(renderModel.lineElos, (value) => Number(value)),
+        showMovingAverage: Boolean(renderModel.showMovingAverage),
+        latestIteration: renderModel.latestIteration ?? null,
+        trackedCheckpointIteration: renderModel.trackedCheckpointIteration ?? null,
+      };
+    }
+
+    function canAnimateNormalModeTransition(previousFrame, nextFrame) {
+      if (!previousFrame || !nextFrame) {
+        return false;
+      }
+
+      if (previousFrame.showMovingAverage !== nextFrame.showMovingAverage) {
+        return false;
+      }
+
+      if (
+        previousFrame.iterations.length !== nextFrame.iterations.length
+        || previousFrame.elos.length !== nextFrame.elos.length
+      ) {
+        return false;
+      }
+
+      for (let pointIndex = 0; pointIndex < previousFrame.iterations.length; pointIndex += 1) {
+        if (previousFrame.iterations[pointIndex] !== nextFrame.iterations[pointIndex]) {
+          return false;
+        }
+      }
+
+      return true;
+    }
+
+    function projectNormalModeFrameToCanvas(frame, xToCanvas, yToCanvas) {
+      const pointCount = frame.iterations.length;
+      const projectedFrame = {
+        x: new Float32Array(pointCount),
+        y: new Float32Array(pointCount),
+      };
+
+      for (let pointIndex = 0; pointIndex < pointCount; pointIndex += 1) {
+        projectedFrame.x[pointIndex] = xToCanvas(frame.iterations[pointIndex]);
+        projectedFrame.y[pointIndex] = yToCanvas(frame.elos[pointIndex]);
+      }
+
+      return projectedFrame;
+    }
+
+    function syncNormalModeChartDataProjected(container, projectedFrame) {
+      const chartData = container._chartData ?? null;
+      if (!chartData || chartData.cx.length !== projectedFrame.x.length) {
+        return;
+      }
+
+      chartData.cx.set(projectedFrame.x);
+      chartData.cy.set(projectedFrame.y);
+    }
+
+    function drawNormalModeFrame(
+      ctx,
+      width,
+      height,
+      layout,
+      themeColors,
+      logicalFrame,
+      projectedFrame,
+    ) {
+      ctx.clearRect(0, 0, width, height);
+      ctx.fillStyle = themeColors.chartBg;
+      ctx.fillRect(0, 0, width, height);
+      ctx.strokeStyle = themeColors.border;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(0.5, 0.5, width - 1, height - 1);
+
+      ctx.strokeStyle = themeColors.chartGrid;
+      ctx.lineWidth = 1;
+      for (const tick of layout.yTicks) {
+        const y = layout.yToCanvas(tick);
+        ctx.beginPath();
+        ctx.moveTo(layout.padding.left, y);
+        ctx.lineTo(width - layout.padding.right, y);
+        ctx.stroke();
+      }
+      for (const tick of layout.xTicks) {
+        const x = layout.xToCanvas(tick);
+        ctx.beginPath();
+        ctx.moveTo(x, layout.padding.top);
+        ctx.lineTo(x, height - layout.padding.bottom);
+        ctx.stroke();
+      }
+
+      ctx.strokeStyle = themeColors.chartAxis;
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(layout.padding.left, height - layout.padding.bottom);
+      ctx.lineTo(width - layout.padding.right, height - layout.padding.bottom);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(layout.padding.left, layout.padding.top);
+      ctx.lineTo(layout.padding.left, height - layout.padding.bottom);
+      ctx.stroke();
+
+      const drawProjectedPolyline = (ySeries, strokeStyle, lineWidth, alpha = 1) => {
+        if (!projectedFrame.x.length || !ySeries.length) {
+          return;
+        }
+
+        ctx.save();
+        ctx.strokeStyle = strokeStyle;
+        ctx.lineWidth = lineWidth;
+        ctx.lineJoin = "round";
+        ctx.lineCap = "round";
+        ctx.globalAlpha = alpha;
+        ctx.beginPath();
+        for (let pointIndex = 0; pointIndex < projectedFrame.x.length; pointIndex += 1) {
+          const x = projectedFrame.x[pointIndex];
+          const y = ySeries[pointIndex];
+          if (pointIndex === 0) {
+            ctx.moveTo(x, y);
+          } else {
+            ctx.lineTo(x, y);
+          }
+        }
+        ctx.stroke();
+        ctx.restore();
+      };
+
+      drawProjectedPolyline(
+        projectedFrame.y,
+        logicalFrame.showMovingAverage ? themeColors.chartMuted : themeColors.chartLine,
+        logicalFrame.showMovingAverage ? 1.2 : 1.5,
+        logicalFrame.showMovingAverage ? 0.32 : 1,
+      );
+
+      if (logicalFrame.showMovingAverage) {
+        const movingAverageValues = computeMovingAverageValues(
+          logicalFrame.elos,
+          movingAverageWindowSize,
+        );
+        const movingAverageProjectedY = new Float32Array(movingAverageValues.length);
+        for (let pointIndex = 0; pointIndex < movingAverageValues.length; pointIndex += 1) {
+          movingAverageProjectedY[pointIndex] = layout.yToCanvas(movingAverageValues[pointIndex]);
+        }
+        drawProjectedPolyline(movingAverageProjectedY, themeColors.chartAverage, 2.6, 1);
+      }
+
+      let bestElo = Number.NEGATIVE_INFINITY;
+      for (let pointIndex = 0; pointIndex < logicalFrame.elos.length; pointIndex += 1) {
+        const pointElo = Number(logicalFrame.elos[pointIndex]);
+        if (pointElo > bestElo) {
+          bestElo = pointElo;
+        }
+      }
+
+      const regularPoints = [];
+      const specialPoints = [];
+      for (let pointIndex = 0; pointIndex < logicalFrame.iterations.length; pointIndex += 1) {
+        const pointIteration = Number(logicalFrame.iterations[pointIndex]);
+        const pointElo = Number(logicalFrame.elos[pointIndex]);
+        const x = projectedFrame.x[pointIndex];
+        const y = projectedFrame.y[pointIndex];
+        const isLatest =
+          !logicalFrame.showMovingAverage && pointIteration === logicalFrame.latestIteration;
+        const isBest =
+          !logicalFrame.showMovingAverage && Math.abs(pointElo - bestElo) < 1e-9;
+        const isTracked = pointIteration === logicalFrame.trackedCheckpointIteration;
+        const fill = logicalFrame.showMovingAverage
+          ? themeColors.chartMuted
+          : themeColors.chartLine;
+        const opacity = logicalFrame.showMovingAverage ? 0.28 : 1;
+
+        if (!isLatest && !isBest && !isTracked) {
+          regularPoints.push({ x, y });
+          continue;
+        }
+
+        specialPoints.push({
+          x,
+          y,
+          fill: isLatest
+            ? themeColors.chartLatest
+            : isBest
+              ? themeColors.chartBest
+              : fill,
+          radius: (isBest ? 3.6 : isLatest ? 3.2 : 2.4) + (isTracked ? 0.5 : 0),
+          opacity: isTracked ? 1 : opacity,
+          stroke: isTracked ? themeColors.chartAverage : null,
+          strokeWidth: isTracked ? 2 : 0,
+        });
+      }
+
+      if (regularPoints.length) {
+        ctx.save();
+        ctx.globalAlpha = logicalFrame.showMovingAverage ? 0.28 : 1;
+        ctx.fillStyle = logicalFrame.showMovingAverage
+          ? themeColors.chartMuted
+          : themeColors.chartLine;
+        ctx.beginPath();
+        for (const point of regularPoints) {
+          ctx.moveTo(point.x + 2.4, point.y);
+          ctx.arc(point.x, point.y, 2.4, 0, Math.PI * 2);
+        }
+        ctx.fill();
+        ctx.restore();
+      }
+
+      for (const point of specialPoints) {
+        ctx.save();
+        ctx.globalAlpha = point.opacity;
+        ctx.fillStyle = point.fill;
+        ctx.beginPath();
+        ctx.arc(point.x, point.y, point.radius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+
+        if (point.stroke) {
+          ctx.save();
+          ctx.strokeStyle = point.stroke;
+          ctx.lineWidth = point.strokeWidth;
+          ctx.beginPath();
+          ctx.arc(point.x, point.y, point.radius, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.restore();
+        }
+      }
+
+      ctx.fillStyle = themeColors.textMuted;
+      ctx.font = `${layout.tickFontSize}px Arial, sans-serif`;
+      ctx.textBaseline = "middle";
+
+      ctx.textAlign = "center";
+      for (const tick of layout.xTicks) {
+        ctx.fillText(formatInteger(Math.round(tick)), layout.xToCanvas(tick), layout.xTickLabelY);
+      }
+
+      ctx.textAlign = "right";
+      for (const tick of layout.yTicks) {
+        ctx.fillText(formatInteger(Math.round(tick)), layout.padding.left - 10, layout.yToCanvas(tick) + 4);
+      }
+
+      ctx.font = `${layout.axisLabelFontSize}px Arial, sans-serif`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "alphabetic";
+      ctx.fillText("Checkpoint iteration", width / 2, layout.xAxisLabelY);
+
+      ctx.save();
+      ctx.translate(layout.yAxisTitleX, height / 2);
+      ctx.rotate(-Math.PI / 2);
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("Elo", 0, 0);
+      ctx.restore();
+    }
+
+    function renderAnimatedNormalModeChart(
+      container,
+      canvas,
+      tooltip,
+      width,
+      height,
+      layout,
+      themeColors,
+      renderModel,
+      { animate = true } = {},
+    ) {
+      stopNormalModeAnimation(container);
+
+      const devicePixelRatio = Math.max(1, window.devicePixelRatio || 1);
+      const targetCanvasWidth = Math.round(width * devicePixelRatio);
+      const targetCanvasHeight = Math.round(height * devicePixelRatio);
+      if (canvas.width !== targetCanvasWidth || canvas.height !== targetCanvasHeight) {
+        canvas.width = targetCanvasWidth;
+        canvas.height = targetCanvasHeight;
+      }
+
+      const ctx = canvas.getContext("2d", {
+        alpha: false,
+        desynchronized: true,
+      });
+      ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+
+      const nextLogicalFrame = buildNormalModeLogicalFrame(renderModel);
+      const nextProjectedFrame = projectNormalModeFrameToCanvas(
+        nextLogicalFrame,
+        layout.xToCanvas,
+        layout.yToCanvas,
+      );
+
+      const previousDisplayedLogicalFrame = container._normalModeDisplayedLogicalFrame ?? null;
+      const previousDisplayedLayout = container._normalModeDisplayedLayout ?? null;
+      const shouldAnimate = animate
+        && canAnimateNormalModeTransition(previousDisplayedLogicalFrame, nextLogicalFrame)
+        && previousDisplayedLayout !== null;
+
+      if (!shouldAnimate) {
+        syncNormalModeChartDataProjected(container, nextProjectedFrame);
+        drawNormalModeFrame(
+          ctx,
+          width,
+          height,
+          layout,
+          themeColors,
+          nextLogicalFrame,
+          nextProjectedFrame,
+        );
+        container._normalModeDisplayedLogicalFrame = nextLogicalFrame;
+        container._normalModeDisplayedLayout = layout;
+        restoreHoveredTooltip(container, tooltip);
+        return;
+      }
+
+      const durationMs = normalModeAnimationDurationMs;
+      const animationStartedAtMs = performance.now();
+
+      const step = (nowMs) => {
+        const progress = Math.min(1, (nowMs - animationStartedAtMs) / durationMs);
+        const easedProgress = 1 - ((1 - progress) ** 3);
+        const animatedFrame = {
+          iterations: nextLogicalFrame.iterations,
+          elos: interpolateNumericArrays(
+            previousDisplayedLogicalFrame.elos,
+            nextLogicalFrame.elos,
+            easedProgress,
+          ),
+          showMovingAverage: nextLogicalFrame.showMovingAverage,
+          latestIteration: nextLogicalFrame.latestIteration,
+          trackedCheckpointIteration: nextLogicalFrame.trackedCheckpointIteration,
+        };
+        const animatedLayout = buildAnimatedChartLayout(
+          layout,
+          lerpNumber(previousDisplayedLayout.chartMinY, layout.chartMinY, easedProgress),
+          lerpNumber(previousDisplayedLayout.chartMaxY, layout.chartMaxY, easedProgress),
+        );
+        const animatedProjectedFrame = projectNormalModeFrameToCanvas(
+          animatedFrame,
+          animatedLayout.xToCanvas,
+          animatedLayout.yToCanvas,
+        );
+
+        syncNormalModeChartDataProjected(container, animatedProjectedFrame);
+        drawNormalModeFrame(
+          ctx,
+          width,
+          height,
+          animatedLayout,
+          themeColors,
+          animatedFrame,
+          animatedProjectedFrame,
+        );
+        container._normalModeDisplayedLogicalFrame = animatedFrame;
+        container._normalModeDisplayedLayout = animatedLayout;
+        restoreHoveredTooltip(container, tooltip);
+
+        if (progress >= 1) {
+          container._normalModeAnimationFrame = null;
+          container._normalModeDisplayedLogicalFrame = nextLogicalFrame;
+          container._normalModeDisplayedLayout = layout;
+          syncNormalModeChartDataProjected(container, nextProjectedFrame);
+          restoreHoveredTooltip(container, tooltip);
+          return;
+        }
+
+        container._normalModeAnimationFrame = window.requestAnimationFrame(step);
+      };
+
+      container._normalModeAnimationFrame = window.requestAnimationFrame(step);
+    }
+
     function ensureChartElements(container, { useWorker = false } = {}) {
       if (
         container._chartCanvas
@@ -2634,6 +3028,7 @@
         container._chartWorker.terminate();
       }
       stopMinimalModeAnimation(container);
+      stopNormalModeAnimation(container);
 
       container.className = "chart-container";
       container.innerHTML = `
@@ -2663,6 +3058,9 @@
       container._minimalModeDisplayedLogicalFrame = null;
       container._minimalModeDisplayedProjectedFrame = null;
       container._minimalModeDisplayedLayout = null;
+      container._normalModeAnimationFrame = null;
+      container._normalModeDisplayedLogicalFrame = null;
+      container._normalModeDisplayedLayout = null;
 
       if (useWorker && supportsChartWorker) {
         try {
@@ -2766,6 +3164,8 @@
         if (container._chartWorker) {
           container._chartWorker.terminate();
         }
+        stopMinimalModeAnimation(container);
+        stopNormalModeAnimation(container);
         container._chartCanvas = null;
         container._chartTooltip = null;
         container._chartWorker = null;
@@ -2777,6 +3177,9 @@
         container._minimalModeDisplayedLogicalFrame = null;
         container._minimalModeDisplayedProjectedFrame = null;
         container._minimalModeDisplayedLayout = null;
+        container._normalModeAnimationFrame = null;
+        container._normalModeDisplayedLogicalFrame = null;
+        container._normalModeDisplayedLayout = null;
         container._chartData = null;
         container._chartPointIndexByIteration = new Map();
         if (container._chartOverlay) {
@@ -2788,7 +3191,9 @@
         return;
       }
 
-      const useWorker = supportsChartWorker && !renderModel.minimalModeEnabled;
+      const useWorker = supportsChartWorker
+        && !renderModel.minimalModeEnabled
+        && lineIterations.length > denseLiveChartPointThreshold;
       const { canvas, tooltip } = ensureChartElements(container, { useWorker });
       const rect = container.getBoundingClientRect();
       const width = Math.max(1, Math.round(rect.width) || 1200);
@@ -2871,284 +3276,17 @@
         return;
       }
 
-      canvas.width = Math.round(width * devicePixelRatio);
-      canvas.height = Math.round(height * devicePixelRatio);
-      const ctx = canvas.getContext("2d", {
-        alpha: false,
-        desynchronized: true,
-      });
-      ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
-      ctx.clearRect(0, 0, width, height);
-      ctx.fillStyle = themeColors.chartBg;
-      ctx.fillRect(0, 0, width, height);
-      ctx.strokeStyle = themeColors.border;
-      ctx.lineWidth = 1;
-      ctx.strokeRect(0.5, 0.5, width - 1, height - 1);
-
-      const movingAverageValues = showMovingAverage
-        ? computeMovingAveragePoints(
-          lineIterations.map((iteration, index) => ({
-            x: Number(iteration),
-            y: Number(lineElos[index]),
-          })),
-          movingAverageWindowSize,
-        )
-        : [];
-
-      ctx.strokeStyle = themeColors.chartGrid;
-      ctx.lineWidth = 1;
-      for (const tick of layout.yTicks) {
-        const y = yToCanvas(tick);
-        ctx.beginPath();
-        ctx.moveTo(layout.padding.left, y);
-        ctx.lineTo(width - layout.padding.right, y);
-        ctx.stroke();
-      }
-      for (const tick of layout.xTicks) {
-        const x = xToCanvas(tick);
-        ctx.beginPath();
-        ctx.moveTo(x, layout.padding.top);
-        ctx.lineTo(x, height - layout.padding.bottom);
-        ctx.stroke();
-      }
-
-      ctx.strokeStyle = themeColors.chartAxis;
-      ctx.lineWidth = 1.2;
-      ctx.beginPath();
-      ctx.moveTo(layout.padding.left, height - layout.padding.bottom);
-      ctx.lineTo(width - layout.padding.right, height - layout.padding.bottom);
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.moveTo(layout.padding.left, layout.padding.top);
-      ctx.lineTo(layout.padding.left, height - layout.padding.bottom);
-      ctx.stroke();
-
-      const drawPolyline = (seriesPoints, strokeStyle, lineWidth, alpha = 1) => {
-        if (!seriesPoints.length) {
-          return;
-        }
-        ctx.save();
-        ctx.strokeStyle = strokeStyle;
-        ctx.lineWidth = lineWidth;
-        ctx.lineJoin = "round";
-        ctx.lineCap = "round";
-        ctx.globalAlpha = alpha;
-        ctx.beginPath();
-        seriesPoints.forEach((point, index) => {
-          const x = xToCanvas(point.x);
-          const y = yToCanvas(point.y);
-          if (index === 0) {
-            ctx.moveTo(x, y);
-          } else {
-            ctx.lineTo(x, y);
-          }
-        });
-        ctx.stroke();
-        ctx.restore();
-      };
-
-      const drawPolylineFromArrays = (xSeries, ySeries, strokeStyle, lineWidth, alpha = 1) => {
-        if (!xSeries.length || !ySeries.length) {
-          return;
-        }
-
-        ctx.save();
-        ctx.strokeStyle = strokeStyle;
-        ctx.lineWidth = lineWidth;
-        ctx.lineJoin = "round";
-        ctx.lineCap = "round";
-        ctx.globalAlpha = alpha;
-        ctx.beginPath();
-        for (let pointIndex = 0; pointIndex < xSeries.length; pointIndex += 1) {
-          const x = xToCanvas(Number(xSeries[pointIndex]));
-          const y = yToCanvas(Number(ySeries[pointIndex]));
-          if (pointIndex === 0) {
-            ctx.moveTo(x, y);
-          } else {
-            ctx.lineTo(x, y);
-          }
-        }
-        ctx.stroke();
-        ctx.restore();
-      };
-
-      const drawBandFromArrays = (xSeries, lowerSeries, upperSeries, fillStyle, alpha = 1) => {
-        const seriesLength = Math.min(
-          xSeries.length,
-          lowerSeries.length,
-          upperSeries.length,
-        );
-        if (!seriesLength) {
-          return;
-        }
-
-        ctx.save();
-        ctx.fillStyle = fillStyle;
-        ctx.globalAlpha = alpha;
-        ctx.beginPath();
-        for (let pointIndex = 0; pointIndex < seriesLength; pointIndex += 1) {
-          const x = xToCanvas(Number(xSeries[pointIndex]));
-          const y = yToCanvas(Number(upperSeries[pointIndex]));
-          if (pointIndex === 0) {
-            ctx.moveTo(x, y);
-          } else {
-            ctx.lineTo(x, y);
-          }
-        }
-        for (let pointIndex = seriesLength - 1; pointIndex >= 0; pointIndex -= 1) {
-          const x = xToCanvas(Number(xSeries[pointIndex]));
-          const y = yToCanvas(Number(lowerSeries[pointIndex]));
-          ctx.lineTo(x, y);
-        }
-        ctx.closePath();
-        ctx.fill();
-        ctx.restore();
-      };
-
-      if (renderModel.minimalModeEnabled) {
-        drawBandFromArrays(
-          lineIterations,
-          bandLowerElos,
-          bandUpperElos,
-          themeColors.chartAverage,
-          0.18,
-        );
-        drawPolylineFromArrays(
-          lineIterations,
-          bandLowerElos,
-          themeColors.chartAverage,
-          1,
-          0.45,
-        );
-        drawPolylineFromArrays(
-          lineIterations,
-          bandUpperElos,
-          themeColors.chartAverage,
-          1,
-          0.45,
-        );
-      }
-
-      drawPolylineFromArrays(
-        lineIterations,
-        lineElos,
-        renderModel.minimalModeEnabled
-          ? themeColors.chartAverage
-          : showMovingAverage
-            ? themeColors.chartMuted
-            : themeColors.chartLine,
-        renderModel.minimalModeEnabled ? 1.7 : showMovingAverage ? 1.2 : 1.5,
-        renderModel.minimalModeEnabled ? 1 : showMovingAverage ? 0.32 : 1,
+      renderAnimatedNormalModeChart(
+        container,
+        canvas,
+        tooltip,
+        width,
+        height,
+        layout,
+        themeColors,
+        renderModel,
+        { animate: animateChart && lineIterations.length <= denseLiveChartPointThreshold },
       );
-
-      if (showMovingAverage && !renderModel.minimalModeEnabled) {
-        drawPolyline(movingAverageValues, themeColors.chartAverage, 2.6, 1);
-      }
-
-      if (!renderModel.minimalModeEnabled) {
-        const regularPoints = [];
-        const specialPoints = [];
-        let bestElo = Number.NEGATIVE_INFINITY;
-        for (let pointIndex = 0; pointIndex < lineElos.length; pointIndex += 1) {
-          const pointElo = Number(lineElos[pointIndex]);
-          if (pointElo > bestElo) {
-            bestElo = pointElo;
-          }
-        }
-
-        for (let pointIndex = 0; pointIndex < pointCount; pointIndex += 1) {
-          const pointIteration = Number(chartData.iterations[pointIndex]);
-          const pointElo = Number(chartData.elos[pointIndex]);
-          const x = chartData.cx[pointIndex];
-          const y = chartData.cy[pointIndex];
-          const isLatest = !showMovingAverage && pointIteration === renderModel.latestIteration;
-          const isBest = !showMovingAverage && Math.abs(pointElo - bestElo) < 1e-9;
-          const isTracked = pointIteration === renderModel.trackedCheckpointIteration;
-          const fill = showMovingAverage ? themeColors.chartMuted : themeColors.chartLine;
-          const opacity = showMovingAverage ? 0.28 : 1;
-
-          if (!isLatest && !isBest && !isTracked) {
-            regularPoints.push({ x, y });
-            continue;
-          }
-
-          specialPoints.push({
-            x,
-            y,
-            fill: isLatest
-              ? themeColors.chartLatest
-              : isBest
-                ? themeColors.chartBest
-                : fill,
-            radius: (isBest ? 3.6 : isLatest ? 3.2 : 2.4) + (isTracked ? 0.5 : 0),
-            opacity: isTracked ? 1 : opacity,
-            stroke: isTracked ? themeColors.chartAverage : null,
-            strokeWidth: isTracked ? 2 : 0,
-          });
-        }
-
-        if (regularPoints.length) {
-          ctx.save();
-          ctx.globalAlpha = showMovingAverage ? 0.28 : 1;
-          ctx.fillStyle = showMovingAverage ? themeColors.chartMuted : themeColors.chartLine;
-          ctx.beginPath();
-          for (const point of regularPoints) {
-            ctx.moveTo(point.x + 2.4, point.y);
-            ctx.arc(point.x, point.y, 2.4, 0, Math.PI * 2);
-          }
-          ctx.fill();
-          ctx.restore();
-        }
-
-        for (const point of specialPoints) {
-          ctx.save();
-          ctx.globalAlpha = point.opacity;
-          ctx.fillStyle = point.fill;
-          ctx.beginPath();
-          ctx.arc(point.x, point.y, point.radius, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.restore();
-
-          if (point.stroke) {
-            ctx.save();
-            ctx.strokeStyle = point.stroke;
-            ctx.lineWidth = point.strokeWidth;
-            ctx.beginPath();
-            ctx.arc(point.x, point.y, point.radius, 0, Math.PI * 2);
-            ctx.stroke();
-            ctx.restore();
-          }
-        }
-      }
-
-      ctx.fillStyle = themeColors.textMuted;
-      ctx.font = `${layout.tickFontSize}px Arial, sans-serif`;
-      ctx.textBaseline = "middle";
-
-      ctx.textAlign = "center";
-      for (const tick of layout.xTicks) {
-        ctx.fillText(formatInteger(Math.round(tick)), xToCanvas(tick), layout.xTickLabelY);
-      }
-
-      ctx.textAlign = "right";
-      for (const tick of layout.yTicks) {
-        ctx.fillText(formatInteger(Math.round(tick)), layout.padding.left - 10, yToCanvas(tick) + 4);
-      }
-
-      ctx.font = `${layout.axisLabelFontSize}px Arial, sans-serif`;
-      ctx.textAlign = "center";
-      ctx.textBaseline = "alphabetic";
-      ctx.fillText("Checkpoint iteration", width / 2, layout.xAxisLabelY);
-
-      ctx.save();
-      ctx.translate(layout.yAxisTitleX, height / 2);
-      ctx.rotate(-Math.PI / 2);
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText("Elo", 0, 0);
-      ctx.restore();
-
-      restoreHoveredTooltip(container, tooltip);
     }
 
     function renderChartState(container, chartState, { animateChart = true } = {}) {
@@ -3473,6 +3611,28 @@
         : 0;
     }
 
+    function getLoopIntervalMs() {
+      if (
+        minimalModeCheckbox.checked
+        || isReplayActive()
+        || !followLatestCheckbox.checked
+      ) {
+        return pollIntervalMs;
+      }
+
+      const visiblePointCount = Number(
+        currentSummary?.num_models ?? currentChartSnapshot?.num_models ?? 0,
+      );
+      if (
+        visiblePointCount > 0
+        && visiblePointCount <= denseLiveChartPointThreshold
+      ) {
+        return smoothSmallChartPollIntervalMs;
+      }
+
+      return pollIntervalMs;
+    }
+
     function shouldFetchLiveChart(nowMs = Date.now(), { force = false } = {}) {
       if (isReplayActive()) {
         return false;
@@ -3644,7 +3804,7 @@
           chart.textContent = `Polling error: ${error.message}`;
         }
       } finally {
-        setTimeout(loop, pollIntervalMs);
+        setTimeout(loop, getLoopIntervalMs());
       }
     }
 
