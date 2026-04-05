@@ -28,8 +28,7 @@ The training script is `src/train_CLI.py`. In the environment, you start a train
 python -m src.train_CLI
 ```
 
-Optional and mutually exclusive flags are:
-- `--resume`: resume training from the latest checkpoint (as long as it appears that the previous run was made with the same training hyperparameters as the ones currently set in the code)
+Optional flag:
 - `--delete-existing-checkpoints`: delete all existing checkpoints before starting training
 
 During training, you can monitor metrics such as the losses, the learning rate, the memory size, etc.with TensorBoard.
