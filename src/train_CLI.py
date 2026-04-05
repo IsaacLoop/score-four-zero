@@ -297,6 +297,7 @@ def train(
             )
 
             # Evaluating
+            checkpoint_winrates = {}
             for evaluation_checkpoint_gap in EVAL_CHECKPOINT_GAPS:
                 if len(saved_checkpoint_paths) < evaluation_checkpoint_gap:
                     continue
@@ -309,9 +310,14 @@ def train(
                     max_workers=N_PARALLEL_WORKERS,
                     c_puct=C_PUCT,
                 )
-                writer.add_scalar(
-                    f"e/checkpoint_winrate_vs_gap_{evaluation_checkpoint_gap}",
-                    float(winrate),
+                checkpoint_winrates[f"gap_{evaluation_checkpoint_gap}"] = float(
+                    winrate
+                )
+
+            if checkpoint_winrates:
+                writer.add_scalars(
+                    "e/checkpoint_winrate",
+                    checkpoint_winrates,
                     iteration,
                 )
 
