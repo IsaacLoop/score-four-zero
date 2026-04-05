@@ -181,14 +181,30 @@ class ParallelFightPool:
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
 
-    def fight_results(self, matchups, desc: str | None = "Fights"):
+    def fight_results(
+        self,
+        matchups,
+        desc: str | None = "Fights",
+        position: int | None = None,
+        leave: bool = False,
+    ):
         path_matchups = [
-            (self.model_paths[idx1], self.model_paths[idx2])
-            for idx1, idx2 in matchups
+            (self.model_paths[idx1], self.model_paths[idx2]) for idx1, idx2 in matchups
         ]
-        return self.fight_path_results(path_matchups, desc=desc)
+        return self.fight_path_results(
+            path_matchups,
+            desc=desc,
+            position=position,
+            leave=leave,
+        )
 
-    def iter_fight_path_results(self, path_matchups, desc: str | None = "Fights"):
+    def iter_fight_path_results(
+        self,
+        path_matchups,
+        desc: str | None = "Fights",
+        position: int | None = None,
+        leave: bool = False,
+    ):
         if self.executor is None:
             raise RuntimeError("ParallelFightPool must be opened before use.")
 
@@ -203,17 +219,27 @@ class ParallelFightPool:
                 completed_futures,
                 total=len(future_to_matchup_index),
                 desc=desc,
+                position=position,
+                leave=leave,
             )
 
         for future in completed_futures:
             matchup_index = future_to_matchup_index[future]
             yield matchup_index, future.result()
 
-    def fight_path_results(self, path_matchups, desc: str | None = "Fights"):
+    def fight_path_results(
+        self,
+        path_matchups,
+        desc: str | None = "Fights",
+        position: int | None = None,
+        leave: bool = False,
+    ):
         results = [None] * len(path_matchups)
         for matchup_index, result in self.iter_fight_path_results(
             path_matchups,
             desc=desc,
+            position=position,
+            leave=leave,
         ):
             results[matchup_index] = result
 
@@ -303,7 +329,9 @@ class ParallelEloPool:
                         path_matchups.append((model_paths[idx1], model_paths[idx2]))
                 results = self.fight_pool.fight_path_results(path_matchups, desc=None)
 
-                for (idx1, idx2), swapped, result in zip(matchup_indices, swapped_flags, results):
+                for (idx1, idx2), swapped, result in zip(
+                    matchup_indices, swapped_flags, results
+                ):
                     remapped_result = remap_fight_result(result, swapped)
                     updated_elos[idx1], updated_elos[idx2] = compute_new_elos(
                         updated_elos[idx1],

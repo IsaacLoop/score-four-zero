@@ -1,4 +1,5 @@
 import argparse
+import math
 import os
 import shutil
 from pathlib import Path
@@ -9,9 +10,9 @@ from torch.optim import AdamW
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-from .elo_history import checkpoint_iteration
 from .PolicyValueModel import PolicyValueModel
 from .ReplayBuffer import ReplayBuffer
+from .elo_parallel import ParallelFightPool, remap_fight_result
 from .self_play_parallel import ParallelSelfPlayPool
 
 
@@ -20,42 +21,71 @@ def learning_rate_at_step(
     total_steps: int,
     peak_lr: float,
     final_lr: float,
-    hold_fraction: float = 0.20,
-    decay_end_fraction: float = 0.95,
 ):
-    if total_steps <= 1:
-        return final_lr
-
-    hold_steps = int(total_steps * hold_fraction)
-    decay_end_step = int(total_steps * decay_end_fraction)
-
-    if step < hold_steps:
-        return peak_lr
-
-    if step >= decay_end_step:
-        return final_lr
-
-    decay_span = max(1, decay_end_step - hold_steps)
-    progress = (step - hold_steps) / decay_span
-    return peak_lr + (final_lr - peak_lr) * progress
-
-
-def latest_checkpoint_path(checkpoint_dir: Path):
-    checkpoint_paths = list(checkpoint_dir.glob("iteration_*.pt"))
-    if not checkpoint_paths:
-        return None
-
-    return max(checkpoint_paths, key=checkpoint_iteration)
+    progress = step / (total_steps - 1)
+    cosine_factor = 0.5 * (1.0 + math.cos(math.pi * progress))
+    return final_lr + (peak_lr - final_lr) * cosine_factor
 
 
 def format_learning_rate(value: float):
     return f"{value:.0e}".replace("e-0", "e-").replace("e+0", "e+")
 
 
+def previous_checkpoint_winrate(
+    previous_checkpoint_path: Path,
+    current_checkpoint_path: Path,
+    num_fights: int,
+    num_simulations: int,
+    max_workers: int,
+    c_puct: float,
+) -> float:
+    path_matchups = []
+    swapped_flags = []
+
+    for fight_index in range(num_fights):
+        swapped = fight_index % 2 == 1
+        swapped_flags.append(swapped)
+        if swapped:
+            path_matchups.append(
+                (
+                    str(previous_checkpoint_path),
+                    str(current_checkpoint_path),
+                )
+            )
+        else:
+            path_matchups.append(
+                (
+                    str(current_checkpoint_path),
+                    str(previous_checkpoint_path),
+                )
+            )
+
+    with ParallelFightPool(
+        model_paths=(),
+        num_simulations=num_simulations,
+        max_workers=max_workers,
+        c_puct=c_puct,
+    ) as fight_pool:
+        results = fight_pool.fight_path_results(
+            path_matchups,
+            desc="Evaluation",
+            position=3,
+            leave=False,
+        )
+
+    wins = 0
+    for result, swapped in zip(results, swapped_flags):
+        remapped_result = remap_fight_result(result, swapped)
+        if remapped_result == -1:
+            wins += 1
+
+    return wins / num_fights
+
+
 def train(
     delete_existing_checkpoints: bool = False,
-    num_iterations: int = 20_000,
-    resume: bool = False,
+    num_iterations: int = 10_000,
+    workers: int = 24,
 ):
     NUM_ITERATIONS = num_iterations
     GAMES_PER_ITERATION = 32
@@ -69,40 +99,22 @@ def train(
     DIRICHLET_EPSILON = 0.25
     LEARNING_RATE = 3e-4
     FINAL_LEARNING_RATE = 3e-5
-    LR_HOLD_FRACTION = 0.20
-    LR_DECAY_END_FRACTION = 0.95
     CHECKPOINT_EVERY_ITERATIONS = 10
+    EVAL_FIGHTS_PER_CHECKPOINT = 20
     WEIGHT_DECAY = 1e-4
     MAX_GRAD_NORM = 1.0
     NUM_SAMPLING_MOVES = 8
-    N_PARALLEL_WORKERS = min(20, GAMES_PER_ITERATION, os.cpu_count() or 1)
+    N_PARALLEL_WORKERS = min(workers, GAMES_PER_ITERATION, os.cpu_count() or 1)
     SELF_PLAY_WORKER_MAX_TASKS = 1000
     TENSORBOARD_DIR = Path("tb_logs")
 
     CHECKPOINT_DIR = Path("checkpoints")
-    TRAINING_CONFIG = {
-        "games_per_iteration": GAMES_PER_ITERATION,
-        "train_steps_per_iteration": TRAIN_STEPS_PER_ITERATION,
-        "batch_size": BATCH_SIZE,
-        "replay_buffer_size": REPLAY_BUFFER_SIZE,
-        "num_simulations_training": NUM_SIMULATIONS_TRAINING,
-        "c_puct": C_PUCT,
-        "dirichlet_alpha": DIRICHLET_ALPHA,
-        "dirichlet_epsilon": DIRICHLET_EPSILON,
-        "learning_rate": LEARNING_RATE,
-        "final_learning_rate": FINAL_LEARNING_RATE,
-        "lr_hold_fraction": LR_HOLD_FRACTION,
-        "lr_decay_end_fraction": LR_DECAY_END_FRACTION,
-        "weight_decay": WEIGHT_DECAY,
-        "max_grad_norm": MAX_GRAD_NORM,
-        "num_sampling_moves": NUM_SAMPLING_MOVES,
-    }
 
     CHECKPOINT_DIR.mkdir(exist_ok=True)
     if delete_existing_checkpoints:
         for checkpoint_path in CHECKPOINT_DIR.glob("iteration_*.pt"):
             checkpoint_path.unlink()
-    if TENSORBOARD_DIR.exists() and not resume:
+    if TENSORBOARD_DIR.exists():
         shutil.rmtree(TENSORBOARD_DIR)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -130,75 +142,30 @@ def train(
     total_train_steps = NUM_ITERATIONS * TRAIN_STEPS_PER_ITERATION
     global_train_step = 0
     current_lr = LEARNING_RATE
-    start_iteration = 0
-
-    if resume:
-        checkpoint_path = latest_checkpoint_path(CHECKPOINT_DIR)
-        if checkpoint_path is None:
-            print("No checkpoints found to resume from. Starting fresh.")
-        else:
-            checkpoint = torch.load(
-                checkpoint_path,
-                map_location=device,
-                weights_only=False,
-            )
-            checkpoint_training_config = checkpoint.get("training_config")
-            if checkpoint_training_config != TRAINING_CONFIG:
-                raise RuntimeError(
-                    "Latest checkpoint is not compatible with current training settings."
-                )
-
-            try:
-                model.load_state_dict(checkpoint["model_state_dict"])
-            except RuntimeError as e:
-                raise RuntimeError(
-                    "Latest checkpoint is not compatible with the current model architecture."
-                ) from e
-
-            optimizer_state_dict = checkpoint.get("optimizer_state_dict")
-            if optimizer_state_dict is not None:
-                optimizer.load_state_dict(optimizer_state_dict)
-
-            start_iteration = checkpoint_iteration(checkpoint_path) + 1
-            global_train_step = int(
-                checkpoint.get(
-                    "global_train_step",
-                    start_iteration * TRAIN_STEPS_PER_ITERATION,
-                )
-            )
+    latest_saved_checkpoint_path = None
 
     current_lr = learning_rate_at_step(
         step=global_train_step,
         total_steps=total_train_steps,
         peak_lr=LEARNING_RATE,
         final_lr=FINAL_LEARNING_RATE,
-        hold_fraction=LR_HOLD_FRACTION,
-        decay_end_fraction=LR_DECAY_END_FRACTION,
     )
     for param_group in optimizer.param_groups:
         param_group["lr"] = current_lr
 
-    hold_iteration = int(NUM_ITERATIONS * LR_HOLD_FRACTION)
-    decay_end_iteration = int(NUM_ITERATIONS * LR_DECAY_END_FRACTION)
     print("- Device: " + ("Cuda 🥰" if device.type == "cuda" else "CPU 🥹"))
     print(f"- Trainable parameters: {trainable_parameters:,}")
     print(f"- Self-play workers: {N_PARALLEL_WORKERS:,}")
     print(f"- Total iterations: {NUM_ITERATIONS:,}")
     print(
         "- LR schedule: "
-        f"{format_learning_rate(LEARNING_RATE)} until iteration {hold_iteration:,}, "
-        f"then linear decay to {format_learning_rate(FINAL_LEARNING_RATE)} "
-        f"until iteration {decay_end_iteration:,}"
+        f"cosine decay from {format_learning_rate(LEARNING_RATE)} "
+        f"to {format_learning_rate(FINAL_LEARNING_RATE)}."
     )
-    if start_iteration > 0:
-        print(
-            "- Resuming from a previous run, "
-            f"starting from iteration {start_iteration:,}"
-        )
     print()
 
     iteration_bar = tqdm(
-        range(start_iteration, NUM_ITERATIONS),
+        range(NUM_ITERATIONS),
         desc="Iterations",
         position=0,
     )
@@ -224,7 +191,14 @@ def train(
             continue
 
         # 2 - Training
+        loss_total_cum = 0.0
+        loss_policy_cum = 0.0
+        loss_value_cum = 0.0
+        lr_cum = 0.0
+        replay_buffer_size_cum = 0.0
+
         model.train()
+
         for _ in tqdm(
             range(TRAIN_STEPS_PER_ITERATION),
             desc="Training",
@@ -250,8 +224,6 @@ def train(
                 total_steps=total_train_steps,
                 peak_lr=LEARNING_RATE,
                 final_lr=FINAL_LEARNING_RATE,
-                hold_fraction=LR_HOLD_FRACTION,
-                decay_end_fraction=LR_DECAY_END_FRACTION,
             )
             iteration_bar.set_postfix({"lr": f"{current_lr:.4e}"})
             for param_group in optimizer.param_groups:
@@ -279,37 +251,62 @@ def train(
             optimizer.step()
             global_train_step += 1
 
-            writer.add_scalar("t/loss_total", float(loss.item()), global_train_step)
-            writer.add_scalar(
-                "t/loss_policy",
-                float(policy_loss.item()),
-                global_train_step,
-            )
-            writer.add_scalar(
-                "t/loss_value",
-                float(value_loss.item()),
-                global_train_step,
-            )
-            writer.add_scalar("t/lr", float(current_lr), global_train_step)
-            writer.add_scalar(
-                "t/replay_buffer_size",
-                float(len(replay_buffer)),
-                global_train_step,
-            )
+            loss_total_cum += float(loss.item())
+            loss_policy_cum += float(policy_loss.item())
+            loss_value_cum += float(value_loss.item())
+            lr_cum += float(current_lr)
+            replay_buffer_size_cum += float(len(replay_buffer))
 
-        # 3 - Saving checkpoints
+        writer.add_scalar(
+            "t/loss_total",
+            float(loss_total_cum / TRAIN_STEPS_PER_ITERATION),
+            iteration,
+        )
+        writer.add_scalar(
+            "t/loss_policy",
+            float(loss_policy_cum / TRAIN_STEPS_PER_ITERATION),
+            iteration,
+        )
+        writer.add_scalar(
+            "t/loss_value",
+            float(loss_value_cum / TRAIN_STEPS_PER_ITERATION),
+            iteration,
+        )
+        writer.add_scalar("t/lr", float(lr_cum / TRAIN_STEPS_PER_ITERATION), iteration)
+        writer.add_scalar(
+            "t/replay_buffer_size",
+            float(replay_buffer_size_cum / TRAIN_STEPS_PER_ITERATION),
+            iteration,
+        )
+
+        # Saving checkpoints
         if iteration % CHECKPOINT_EVERY_ITERATIONS == 0:
             checkpoint_path = CHECKPOINT_DIR / f"iteration_{iteration}.pt"
             torch.save(
                 {
                     "iteration": iteration + 1,
                     "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "global_train_step": global_train_step,
-                    "training_config": TRAINING_CONFIG,
                 },
                 checkpoint_path,
             )
+
+            # Evaluating
+            if latest_saved_checkpoint_path is not None:
+                winrate = previous_checkpoint_winrate(
+                    latest_saved_checkpoint_path,
+                    checkpoint_path,
+                    num_fights=EVAL_FIGHTS_PER_CHECKPOINT,
+                    num_simulations=NUM_SIMULATIONS_TRAINING,
+                    max_workers=N_PARALLEL_WORKERS,
+                    c_puct=C_PUCT,
+                )
+                writer.add_scalar(
+                    "e/prev_checkpoint_winrate",
+                    float(winrate),
+                    iteration,
+                )
+
+            latest_saved_checkpoint_path = checkpoint_path
 
     self_play_pool.close()
     writer.close()
@@ -320,13 +317,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num-iterations",
         type=int,
-        default=20_000,
-        help="Number of training iterations to run. Default: 20000.",
+        default=10_000,
+        help="Number of training iterations to run. Default: 10,000.",
     )
     parser.add_argument(
-        "--resume",
-        action="store_true",
-        help="Resume from the highest compatible iteration_*.pt checkpoint.",
+        "--workers",
+        type=int,
+        default=24,
+        help="Number of self-play worker processes to use. Default: 24.",
     )
     parser.add_argument(
         "--delete-existing-checkpoints",
@@ -334,12 +332,8 @@ if __name__ == "__main__":
         help="Delete existing iteration_*.pt checkpoints before training starts.",
     )
     args = parser.parse_args()
-    if args.resume and args.delete_existing_checkpoints:
-        parser.error(
-            "--resume and --delete-existing-checkpoints cannot be used together"
-        )
     train(
         delete_existing_checkpoints=args.delete_existing_checkpoints,
         num_iterations=args.num_iterations,
-        resume=args.resume,
+        workers=args.workers,
     )
