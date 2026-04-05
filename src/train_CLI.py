@@ -34,7 +34,6 @@ def format_learning_rate(value: float):
 def previous_checkpoint_winrate(
     previous_checkpoint_path: Path,
     current_checkpoint_path: Path,
-    num_fights: int,
     num_simulations: int,
     max_workers: int,
     c_puct: float,
@@ -42,7 +41,7 @@ def previous_checkpoint_winrate(
     path_matchups = []
     swapped_flags = []
 
-    for fight_index in range(num_fights):
+    for fight_index in (0, 1):
         swapped = fight_index % 2 == 1
         swapped_flags.append(swapped)
         if swapped:
@@ -73,13 +72,15 @@ def previous_checkpoint_winrate(
             leave=False,
         )
 
-    wins = 0
+    score = 0.0
     for result, swapped in zip(results, swapped_flags):
         remapped_result = remap_fight_result(result, swapped)
         if remapped_result == -1:
-            wins += 1
+            score += 1.0
+        elif remapped_result == 0:
+            score += 0.5
 
-    return wins / num_fights
+    return score / 2.0
 
 
 def train(
@@ -101,7 +102,6 @@ def train(
     FINAL_LEARNING_RATE = 3e-5
     CHECKPOINT_EVERY_ITERATIONS = 10
     EVAL_CHECKPOINT_GAPS = (2, 5, 10)
-    EVAL_FIGHTS_PER_GAP = 10
     WEIGHT_DECAY = 1e-4
     MAX_GRAD_NORM = 1.0
     NUM_SAMPLING_MOVES = 8
@@ -158,11 +158,6 @@ def train(
     print(f"- Trainable parameters: {trainable_parameters:,}")
     print(f"- Workers: {N_PARALLEL_WORKERS:,}")
     print(f"- Total iterations: {NUM_ITERATIONS:,}")
-    print(
-        "- Evaluation: "
-        f"{EVAL_FIGHTS_PER_GAP} fights vs gaps "
-        + ", ".join(str(gap) for gap in EVAL_CHECKPOINT_GAPS)
-    )
     print(
         "- LR schedule: "
         f"cosine decay from {format_learning_rate(LEARNING_RATE)} "
@@ -305,7 +300,6 @@ def train(
                 winrate = previous_checkpoint_winrate(
                     saved_checkpoint_paths[-evaluation_checkpoint_gap],
                     checkpoint_path,
-                    num_fights=EVAL_FIGHTS_PER_GAP,
                     num_simulations=NUM_SIMULATIONS_TRAINING,
                     max_workers=N_PARALLEL_WORKERS,
                     c_puct=C_PUCT,
