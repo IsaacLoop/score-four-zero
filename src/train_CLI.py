@@ -86,6 +86,7 @@ def train(
     delete_existing_checkpoints: bool = False,
     num_iterations: int = 10_000,
     workers: int = 24,
+    evaluation_checkpoint_gap: int = 1,
 ):
     NUM_ITERATIONS = num_iterations
     GAMES_PER_ITERATION = 32
@@ -142,7 +143,7 @@ def train(
     total_train_steps = NUM_ITERATIONS * TRAIN_STEPS_PER_ITERATION
     global_train_step = 0
     current_lr = LEARNING_RATE
-    latest_saved_checkpoint_path = None
+    saved_checkpoint_paths = []
 
     current_lr = learning_rate_at_step(
         step=global_train_step,
@@ -155,7 +156,7 @@ def train(
 
     print("- Device: " + ("Cuda 🥰" if device.type == "cuda" else "CPU 🥹"))
     print(f"- Trainable parameters: {trainable_parameters:,}")
-    print(f"- Self-play workers: {N_PARALLEL_WORKERS:,}")
+    print(f"- Workers: {N_PARALLEL_WORKERS:,}")
     print(f"- Total iterations: {NUM_ITERATIONS:,}")
     print(
         "- LR schedule: "
@@ -291,9 +292,9 @@ def train(
             )
 
             # Evaluating
-            if latest_saved_checkpoint_path is not None:
+            if len(saved_checkpoint_paths) >= evaluation_checkpoint_gap:
                 winrate = previous_checkpoint_winrate(
-                    latest_saved_checkpoint_path,
+                    saved_checkpoint_paths[-evaluation_checkpoint_gap],
                     checkpoint_path,
                     num_fights=EVAL_FIGHTS_PER_CHECKPOINT,
                     num_simulations=NUM_SIMULATIONS_TRAINING,
@@ -301,12 +302,12 @@ def train(
                     c_puct=C_PUCT,
                 )
                 writer.add_scalar(
-                    "e/prev_checkpoint_winrate",
+                    f"e/checkpoint_winrate_vs_gap_{evaluation_checkpoint_gap}",
                     float(winrate),
                     iteration,
                 )
 
-            latest_saved_checkpoint_path = checkpoint_path
+            saved_checkpoint_paths.append(checkpoint_path)
 
     self_play_pool.close()
     writer.close()
@@ -327,6 +328,12 @@ if __name__ == "__main__":
         help="Number of self-play worker processes to use. Default: 24.",
     )
     parser.add_argument(
+        "--evaluation-checkpoint-gap",
+        type=int,
+        default=1,
+        help="Compare each saved checkpoint against the saved checkpoint this many slots back. Default: 1.",
+    )
+    parser.add_argument(
         "--delete-existing-checkpoints",
         action="store_true",
         help="Delete existing iteration_*.pt checkpoints before training starts.",
@@ -336,4 +343,5 @@ if __name__ == "__main__":
         delete_existing_checkpoints=args.delete_existing_checkpoints,
         num_iterations=args.num_iterations,
         workers=args.workers,
+        evaluation_checkpoint_gap=args.evaluation_checkpoint_gap,
     )
