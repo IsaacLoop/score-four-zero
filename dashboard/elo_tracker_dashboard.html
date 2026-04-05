@@ -438,8 +438,17 @@
       background: var(--chart-best);
     }
 
+    .chart-highlight-dot.latest {
+      background: var(--chart-latest);
+    }
+
     .chart-highlight-dot.worst {
       background: var(--chart-worst);
+    }
+
+    .chart-highlight-dot.tracked {
+      background: var(--chart-line);
+      box-shadow: 0 0 0 2px var(--chart-average);
     }
 
     .chart-tooltip {
@@ -705,7 +714,7 @@
               <input id="minimal-mode-toggle" type="checkbox">
               Approximate with up to 500 points
             </label>
-            <div class="stat-note">Shows a stable summary band with up to 500 points and only keeps the top 3 best and top 3 worst checkpoints as floating dots.</div>
+            <div class="stat-note">Shows a stable summary band with up to 500 points and only keeps the best checkpoint and, if selected, the tracked checkpoint as floating dots.</div>
           </div>
         </div>
         <div class="panel stat">
@@ -758,7 +767,6 @@
     const denseLiveChartRefreshMs = 1000;
     const jsonPollRetryDelayMs = 120;
     const minimalModeTargetPoints = 500;
-    const minimalModeExtremaCount = 3;
     const minimalModeAnimationDurationMs = 180;
     const normalModeAnimationDurationMs = 160;
     let movingAverageWindowSize = 15;
@@ -916,10 +924,13 @@
       }
 
       movingAverageCard.classList.remove("is-disabled");
-      trackedCheckpointCard.classList.toggle("is-disabled", isMinimalMode);
+      trackedCheckpointCard.classList.toggle(
+        "is-disabled",
+        isMinimalMode && trackedCheckpointIteration === null,
+      );
       movingAverageCheckbox.disabled = isMinimalMode;
       movingAverageWindowSlider.disabled = false;
-      clearTrackedCheckpointButton.disabled = isMinimalMode;
+      clearTrackedCheckpointButton.disabled = false;
       movingAverageNote.textContent = isMinimalMode
         ? "Forced on in minimal mode. The window still controls the smoothing."
         : "";
@@ -1054,7 +1065,7 @@
     }
 
     function updateTrackedCheckpointCard(snapshot) {
-      if (minimalModeCheckbox.checked) {
+      if (minimalModeCheckbox.checked && trackedCheckpointIteration === null) {
         trackedCheckpointMeta.classList.add("compact");
         trackedCheckpointNumber.textContent = "Disabled in minimal mode";
         trackedCheckpointElo.textContent = "";
@@ -1166,6 +1177,13 @@
         return "-";
       }
       return Number(value).toLocaleString("en-US");
+    }
+
+    function formatScientificInteger(value, digits = 2) {
+      if (value === null || value === undefined || Number.isNaN(value)) {
+        return "-";
+      }
+      return Number(value).toExponential(digits).replace("e+", "e");
     }
 
     function formatNumber(value, digits = 1) {
@@ -1610,7 +1628,7 @@
         movingAverageEnabled: movingAverageCheckbox.checked && !minimalModeCheckbox.checked,
         movingAverageWindowSize,
         nightModeEnabled: nightModeToggle.checked,
-        trackedCheckpointIteration: minimalModeCheckbox.checked ? null : trackedCheckpointIteration,
+        trackedCheckpointIteration,
         minimalModeEnabled: minimalModeCheckbox.checked,
         replayPosition: minimalModeCheckbox.checked && isReplayActive()
           ? Number((replayPosition >= 0 ? replayPosition : selectedHistoryIndex).toFixed(4))
@@ -1780,7 +1798,12 @@
       };
     }
 
-    function buildMinimalModeHighlights(iterations, elos, fightCounts) {
+    function buildMinimalModeHighlights(
+      iterations,
+      elos,
+      fightCounts,
+      trackedIteration = null,
+    ) {
       const pointCount = Math.min(iterations.length, elos.length);
       if (!pointCount) {
         return {
@@ -1792,15 +1815,6 @@
         };
       }
 
-      const sortedIndices = Array.from({ length: pointCount }, (_, pointIndex) => pointIndex);
-      sortedIndices.sort((leftIndex, rightIndex) => {
-        const eloDiff = Number(elos[leftIndex]) - Number(elos[rightIndex]);
-        if (eloDiff !== 0) {
-          return eloDiff;
-        }
-        return Number(iterations[leftIndex]) - Number(iterations[rightIndex]);
-      });
-
       const highlightIterations = [];
       const highlightElos = [];
       const highlightFightCounts = [];
@@ -1808,33 +1822,43 @@
       const highlightKinds = [];
       const includedIndices = new Set();
 
-      const addHighlights = (indices, labelPrefix, kind) => {
-        let rank = 1;
-        for (const pointIndex of indices) {
-          if (includedIndices.has(pointIndex)) {
-            continue;
-          }
-
-          includedIndices.add(pointIndex);
-          highlightIterations.push(Number(iterations[pointIndex]));
-          highlightElos.push(Number(elos[pointIndex]));
-          highlightFightCounts.push(Number(fightCounts[pointIndex] ?? 0));
-          highlightLabels.push(`${labelPrefix} #${rank}`);
-          highlightKinds.push(kind);
-          rank += 1;
+      const addHighlight = (pointIndex, label, kind) => {
+        if (pointIndex === null || pointIndex < 0 || includedIndices.has(pointIndex)) {
+          return;
         }
+
+        includedIndices.add(pointIndex);
+        highlightIterations.push(Number(iterations[pointIndex]));
+        highlightElos.push(Number(elos[pointIndex]));
+        highlightFightCounts.push(Number(fightCounts[pointIndex] ?? 0));
+        highlightLabels.push(label);
+        highlightKinds.push(kind);
       };
 
-      addHighlights(
-        sortedIndices.slice(0, Math.min(minimalModeExtremaCount, pointCount)),
-        "Worst",
-        "worst",
-      );
-      addHighlights(
-        sortedIndices.slice(-Math.min(minimalModeExtremaCount, pointCount)).reverse(),
-        "Best",
-        "best",
-      );
+      let bestIndex = 0;
+      for (let pointIndex = 1; pointIndex < pointCount; pointIndex += 1) {
+        const eloDiff = Number(elos[pointIndex]) - Number(elos[bestIndex]);
+        if (
+          eloDiff > 0
+          || (
+            eloDiff === 0
+            && Number(iterations[pointIndex]) < Number(iterations[bestIndex])
+          )
+        ) {
+          bestIndex = pointIndex;
+        }
+      }
+
+      let trackedIndex = null;
+      if (trackedIteration !== null) {
+        const foundTrackedIndex = iterations.indexOf(trackedIteration);
+        if (foundTrackedIndex >= 0) {
+          trackedIndex = foundTrackedIndex;
+        }
+      }
+
+      addHighlight(trackedIndex, "Tracked", "tracked");
+      addHighlight(bestIndex, "Best", "best");
 
       return {
         iterations: highlightIterations,
@@ -1854,7 +1878,12 @@
         elos,
         forcedPointCount,
       );
-      const highlights = buildMinimalModeHighlights(iterations, elos, fightCounts);
+      const highlights = buildMinimalModeHighlights(
+        iterations,
+        elos,
+        fightCounts,
+        trackedCheckpointIteration,
+      );
 
       return {
         reducedSeries,
@@ -2015,7 +2044,7 @@
           interactiveLabels: interpolatedHighlights.labels,
           latestIteration: null,
           showMovingAverage: true,
-          trackedCheckpointIteration: null,
+          trackedCheckpointIteration,
           highlightIterations: interpolatedHighlights.iterations,
           highlightElos: interpolatedHighlights.elos,
           highlightKinds: interpolatedHighlights.kinds,
@@ -2095,7 +2124,7 @@
         interactiveLabels: highlights.labels,
         latestIteration: null,
         showMovingAverage: true,
-        trackedCheckpointIteration: null,
+        trackedCheckpointIteration,
         highlightIterations: highlights.iterations,
         highlightElos: highlights.elos,
         highlightKinds: highlights.kinds,
@@ -2204,7 +2233,7 @@
 
       for (let pointIndex = 0; pointIndex < pointCount; pointIndex += 1) {
         const dot = overlay.children[pointIndex];
-        dot.className = `chart-highlight-dot ${highlightKinds[pointIndex] === "best" ? "best" : "worst"}`;
+        dot.className = `chart-highlight-dot ${highlightKinds[pointIndex]}`;
         dot.style.left = `${chartData.cx[pointIndex]}px`;
         dot.style.top = `${chartData.cy[pointIndex]}px`;
         dot.style.opacity = "1";
@@ -2223,9 +2252,11 @@
           { swatch: "average", label: "Median" },
           { swatch: "band", label: "25th-75th" },
           { swatch: "whisker", label: "10th-90th" },
-          { swatch: "best-dot", label: "Best 3" },
-          { swatch: "worst-dot", label: "Worst 3" },
+          { swatch: "best-dot", label: "Best checkpoint" },
         );
+        if (trackedCheckpointIteration !== null) {
+          legendEntries.push({ swatch: "tracked-dot", label: "Tracked checkpoint" });
+        }
       } else {
         legendEntries.push({ swatch: "line", label: "Elo curve" });
         if (renderModel?.showMovingAverage) {
@@ -2805,15 +2836,10 @@
         const pointElo = Number(logicalFrame.elos[pointIndex]);
         const x = projectedFrame.x[pointIndex];
         const y = projectedFrame.y[pointIndex];
-        const isLatest =
-          !logicalFrame.showMovingAverage && pointIteration === logicalFrame.latestIteration;
-        const isBest =
-          !logicalFrame.showMovingAverage && Math.abs(pointElo - bestElo) < 1e-9;
+        const isLatest = pointIteration === logicalFrame.latestIteration;
+        const isBest = Math.abs(pointElo - bestElo) < 1e-9;
         const isTracked = pointIteration === logicalFrame.trackedCheckpointIteration;
-        const fill = logicalFrame.showMovingAverage
-          ? themeColors.chartMuted
-          : themeColors.chartLine;
-        const opacity = logicalFrame.showMovingAverage ? 0.28 : 1;
+        const fill = themeColors.chartLine;
 
         if (!isLatest && !isBest && !isTracked) {
           regularPoints.push({ x, y });
@@ -2829,7 +2855,7 @@
               ? themeColors.chartBest
               : fill,
           radius: (isBest ? 3.6 : isLatest ? 3.2 : 2.4) + (isTracked ? 0.5 : 0),
-          opacity: isTracked ? 1 : opacity,
+          opacity: 1,
           stroke: isTracked ? themeColors.chartAverage : null,
           strokeWidth: isTracked ? 2 : 0,
         });
@@ -3012,11 +3038,12 @@
       container._normalModeAnimationFrame = window.requestAnimationFrame(step);
     }
 
-    function ensureChartElements(container, { useWorker = false } = {}) {
+    function ensureChartElements(container, { useWorker = false, renderMode = "normal" } = {}) {
       if (
         container._chartCanvas
         && container._chartTooltip
         && container._chartUsesWorker === useWorker
+        && container._chartRenderMode === renderMode
       ) {
         return {
           canvas: container._chartCanvas,
@@ -3050,6 +3077,7 @@
       container._chartPointIndexByIteration = new Map();
       container._chartWorker = null;
       container._chartUsesWorker = false;
+      container._chartRenderMode = renderMode;
       container._chartWorkerBusy = false;
       container._chartPendingWorkerPayload = null;
       container._minimalAnimationFrame = null;
@@ -3194,7 +3222,15 @@
       const useWorker = supportsChartWorker
         && !renderModel.minimalModeEnabled
         && lineIterations.length > denseLiveChartPointThreshold;
-      const { canvas, tooltip } = ensureChartElements(container, { useWorker });
+      const renderMode = renderModel.minimalModeEnabled
+        ? "minimal"
+        : useWorker
+          ? "worker"
+          : "normal";
+      const { canvas, tooltip } = ensureChartElements(container, {
+        useWorker,
+        renderMode,
+      });
       const rect = container.getBoundingClientRect();
       const width = Math.max(1, Math.round(rect.width) || 1200);
       const height = Math.max(1, Math.round(rect.height) || 760);
@@ -3305,7 +3341,7 @@
         slider.value = "0";
         selectedHistoryIndex = -1;
         document.getElementById("selected-snapshot-label").textContent =
-          snapshot ? `Viewing live state @ ${formatInteger(snapshot.total_matches ?? 0)} matches` : "Viewing live state";
+          snapshot ? `Viewing live state @ ${formatScientificInteger(snapshot.total_matches ?? 0)} matches` : "Viewing live state";
         syncReplayButton();
         return;
       }
@@ -3318,7 +3354,7 @@
         selectedHistoryIndex = historySnapshots.length - 1;
         slider.value = String(selectedHistoryIndex);
         document.getElementById("selected-snapshot-label").textContent =
-          snapshot ? `Viewing live state @ ${formatInteger(snapshot.total_matches ?? 0)} matches` : "Viewing live state";
+          snapshot ? `Viewing live state @ ${formatScientificInteger(snapshot.total_matches ?? 0)} matches` : "Viewing live state";
         syncReplayButton();
         return;
       }
@@ -3331,7 +3367,7 @@
       const selectedSnapshot = historySnapshots[selectedHistoryIndex];
       document.getElementById("selected-snapshot-label").textContent =
         selectedSnapshot
-          ? `Viewing snapshot @ ${formatInteger(selectedSnapshot.total_matches ?? 0)} matches`
+          ? `Viewing snapshot @ ${formatScientificInteger(selectedSnapshot.total_matches ?? 0)} matches`
           : "Viewing saved snapshot";
       syncReplayButton();
     }
@@ -3353,12 +3389,11 @@
         fightCountP75Value.textContent = "-";
         fightCountMaxValue.textContent = "-";
         document.getElementById("best-elo-value").textContent = "-";
-        updateTrackedCheckpointCard(snapshot);
         return;
       }
 
       document.getElementById("num-models-value").textContent = formatInteger(snapshot.num_models);
-      totalMatchesValue.textContent = formatInteger(snapshot.total_matches);
+      totalMatchesValue.textContent = formatScientificInteger(snapshot.total_matches);
       const liveRate =
         !isReplayActive() && (followLatestCheckbox.checked || snapshot === currentSummary)
           ? computeRecentMatchRate()
@@ -3375,8 +3410,6 @@
       fightCountMaxValue.textContent = formatNumber(snapshot.fight_count_max);
       document.getElementById("best-elo-value").textContent =
         `${formatNumber(snapshot.best_elo)} @ ${formatInteger(snapshot.best_model_iteration)}/${formatInteger(snapshot.latest_model_iteration)}`;
-
-      updateTrackedCheckpointCard(snapshot);
     }
 
     function updateChart(snapshot, { animateChart = true } = {}) {
@@ -3767,6 +3800,10 @@
         updateStats(statsSnapshot);
       }
 
+      if (shouldUpdateUi || shouldUpdateChart) {
+        updateTrackedCheckpointCard(chartSnapshot);
+      }
+
       if (shouldUpdateChart) {
         lastChartSignature = chartSignature;
         updateChart(chartSnapshot, { animateChart });
@@ -3859,9 +3896,6 @@
       syncModeDependentCards();
       saveUiSettings();
       renderDisplayedSnapshot({ animateChart: false, force: true });
-      if (followLatestCheckbox.checked) {
-        void ensureLiveChartCurrent({ forceRender: true });
-      }
     });
 
     workerCountSlider.addEventListener("input", () => {

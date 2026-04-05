@@ -378,11 +378,10 @@ function drawChart(payload) {
       const pointElo = Number(elos[pointIndex]);
       const x = xToCanvas(pointIteration);
       const y = yToCanvas(pointElo);
-      const isLatest = !showMovingAverage && pointIteration === latestIteration;
-      const isBest = !showMovingAverage && Math.abs(pointElo - bestElo) < 1e-9;
+      const isLatest = pointIteration === latestIteration;
+      const isBest = Math.abs(pointElo - bestElo) < 1e-9;
       const isTracked = pointIteration === trackedCheckpointIteration;
-      const fill = showMovingAverage ? themeColors.chartMuted : themeColors.chartLine;
-      const opacity = showMovingAverage ? 0.28 : 1;
+      const fill = themeColors.chartLine;
 
       if (!isLatest && !isBest && !isTracked) {
         regularPoints.push({ x, y });
@@ -398,7 +397,7 @@ function drawChart(payload) {
             ? themeColors.chartBest
             : fill,
         radius: (isBest ? 3.6 : isLatest ? 3.2 : 2.4) + (isTracked ? 0.5 : 0),
-        opacity: isTracked ? 1 : opacity,
+        opacity: 1,
         stroke: isTracked ? themeColors.chartAverage : null,
         strokeWidth: isTracked ? 2 : 0,
       });

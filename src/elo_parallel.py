@@ -156,6 +156,7 @@ class ParallelFightPool:
         self.c_puct = c_puct
         self.max_tasks_per_child = max_tasks_per_child
         self.executor = None
+        self.result_cache = {}
 
     def open(self):
         if self.executor is not None:
@@ -208,24 +209,43 @@ class ParallelFightPool:
         if self.executor is None:
             raise RuntimeError("ParallelFightPool must be opened before use.")
 
-        future_to_matchup_index = {
-            self.executor.submit(_fight_worker, path1, path2): matchup_index
-            for matchup_index, (path1, path2) in enumerate(path_matchups)
-        }
+        cached_results = []
+        future_to_matchup = {}
 
-        completed_futures = as_completed(future_to_matchup_index)
+        for matchup_index, path_matchup in enumerate(path_matchups):
+            cached_result = self.result_cache.get(path_matchup)
+            if cached_result is not None:
+                cached_results.append((matchup_index, cached_result))
+                continue
+
+            future = self.executor.submit(_fight_worker, *path_matchup)
+            future_to_matchup[future] = (matchup_index, path_matchup)
+
+        progress_bar = None
         if desc is not None:
-            completed_futures = tqdm(
-                completed_futures,
-                total=len(future_to_matchup_index),
+            progress_bar = tqdm(
+                total=len(path_matchups),
                 desc=desc,
                 position=position,
                 leave=leave,
             )
 
-        for future in completed_futures:
-            matchup_index = future_to_matchup_index[future]
-            yield matchup_index, future.result()
+        try:
+            for matchup_index, cached_result in cached_results:
+                if progress_bar is not None:
+                    progress_bar.update(1)
+                yield matchup_index, cached_result
+
+            for future in as_completed(future_to_matchup):
+                matchup_index, path_matchup = future_to_matchup[future]
+                result = future.result()
+                self.result_cache[path_matchup] = result
+                if progress_bar is not None:
+                    progress_bar.update(1)
+                yield matchup_index, result
+        finally:
+            if progress_bar is not None:
+                progress_bar.close()
 
     def fight_path_results(
         self,

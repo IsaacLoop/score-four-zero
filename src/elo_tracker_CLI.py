@@ -30,6 +30,7 @@ WORKER_JS_PATH = PROJECT_ROOT / "dashboard" / "elo_chart_worker.js"
 MIN_WORKERS = 1
 MAX_WORKERS = 24
 TRACKER_STATE_SCHEMA_VERSION = 1
+DEFAULT_SNAPSHOT_MIN_INTERVAL_S = 0.5
 
 
 class LiveEloTracker:
@@ -42,10 +43,11 @@ class LiveEloTracker:
         num_simulations: int = 25,
         max_workers: int = 6,
         c_puct: float = 1.5,
-        elo_k: float = 20.0,
+        elo_k: float = 10.0,
         matchup_distance_scale: float = 200.0,
         matchup_min_weight: float = 0.05,
         snapshot_interval_matches: int = 10,
+        snapshot_min_interval_s: float = DEFAULT_SNAPSHOT_MIN_INTERVAL_S,
         checkpoint_stable_age_s: float = 2.0,
         idle_sleep_s: float = 1.0,
         max_tasks_per_child: int = 100,
@@ -60,6 +62,7 @@ class LiveEloTracker:
         self.matchup_distance_scale = matchup_distance_scale
         self.matchup_min_weight = matchup_min_weight
         self.snapshot_interval_matches = snapshot_interval_matches
+        self.snapshot_min_interval_s = snapshot_min_interval_s
         self.checkpoint_stable_age_s = checkpoint_stable_age_s
         self.idle_sleep_s = idle_sleep_s
         self.max_tasks_per_child = max_tasks_per_child
@@ -77,6 +80,7 @@ class LiveEloTracker:
         self.last_update_at = None
         self.snapshot_history = []
         self._next_snapshot_match_count = self.snapshot_interval_matches
+        self._next_snapshot_time = time.perf_counter()
         self._chart_version = 0
         self._chart_snapshot = self._build_chart_snapshot_unlocked()
         self._summary_snapshot = self._build_summary_snapshot_unlocked(
@@ -451,6 +455,7 @@ class LiveEloTracker:
     def _apply_single_result(self, sample, result):
         idx1, idx2, swapped = sample
         should_persist = False
+        now = time.perf_counter()
 
         with self._lock:
             normalized_result = remap_fight_result(result, swapped)
@@ -466,9 +471,14 @@ class LiveEloTracker:
 
             self.last_update_at = datetime.now(timezone.utc).isoformat()
             self._refresh_snapshots_unlocked()
-            while self.total_matches >= self._next_snapshot_match_count:
+            if (
+                self.total_matches >= self._next_snapshot_match_count
+                and now >= self._next_snapshot_time
+            ):
                 self.snapshot_history.append(self._chart_snapshot)
-                self._next_snapshot_match_count += self.snapshot_interval_matches
+                while self._next_snapshot_match_count <= self.total_matches:
+                    self._next_snapshot_match_count += self.snapshot_interval_matches
+                self._next_snapshot_time = now + self.snapshot_min_interval_s
                 should_persist = True
 
         if should_persist:
@@ -590,7 +600,7 @@ def main():
     parser.add_argument("--workers", type=int, default=6)
     parser.add_argument("--num-simulations", type=int, default=25)
     parser.add_argument("--c-puct", type=float, default=1.5)
-    parser.add_argument("--elo-k", type=float, default=20.0)
+    parser.add_argument("--elo-k", type=float, default=10.0)
     parser.add_argument("--matchup-distance-scale", type=float, default=200.0)
     parser.add_argument("--matchup-min-weight", type=float, default=0.05)
     parser.add_argument("--snapshot-interval-matches", type=int, default=10)
