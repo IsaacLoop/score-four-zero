@@ -86,7 +86,6 @@ def train(
     delete_existing_checkpoints: bool = False,
     num_iterations: int = 10_000,
     workers: int = 24,
-    evaluation_checkpoint_gap: int = 1,
 ):
     NUM_ITERATIONS = num_iterations
     GAMES_PER_ITERATION = 32
@@ -101,7 +100,8 @@ def train(
     LEARNING_RATE = 3e-4
     FINAL_LEARNING_RATE = 3e-5
     CHECKPOINT_EVERY_ITERATIONS = 10
-    EVAL_FIGHTS_PER_CHECKPOINT = 20
+    EVAL_CHECKPOINT_GAPS = (2, 5, 10)
+    EVAL_FIGHTS_PER_GAP = 10
     WEIGHT_DECAY = 1e-4
     MAX_GRAD_NORM = 1.0
     NUM_SAMPLING_MOVES = 8
@@ -158,6 +158,11 @@ def train(
     print(f"- Trainable parameters: {trainable_parameters:,}")
     print(f"- Workers: {N_PARALLEL_WORKERS:,}")
     print(f"- Total iterations: {NUM_ITERATIONS:,}")
+    print(
+        "- Evaluation: "
+        f"{EVAL_FIGHTS_PER_GAP} fights vs gaps "
+        + ", ".join(str(gap) for gap in EVAL_CHECKPOINT_GAPS)
+    )
     print(
         "- LR schedule: "
         f"cosine decay from {format_learning_rate(LEARNING_RATE)} "
@@ -292,11 +297,14 @@ def train(
             )
 
             # Evaluating
-            if len(saved_checkpoint_paths) >= evaluation_checkpoint_gap:
+            for evaluation_checkpoint_gap in EVAL_CHECKPOINT_GAPS:
+                if len(saved_checkpoint_paths) < evaluation_checkpoint_gap:
+                    continue
+
                 winrate = previous_checkpoint_winrate(
                     saved_checkpoint_paths[-evaluation_checkpoint_gap],
                     checkpoint_path,
-                    num_fights=EVAL_FIGHTS_PER_CHECKPOINT,
+                    num_fights=EVAL_FIGHTS_PER_GAP,
                     num_simulations=NUM_SIMULATIONS_TRAINING,
                     max_workers=N_PARALLEL_WORKERS,
                     c_puct=C_PUCT,
@@ -328,12 +336,6 @@ if __name__ == "__main__":
         help="Number of self-play worker processes to use. Default: 24.",
     )
     parser.add_argument(
-        "--evaluation-checkpoint-gap",
-        type=int,
-        default=1,
-        help="Compare each saved checkpoint against the saved checkpoint this many slots back. Default: 1.",
-    )
-    parser.add_argument(
         "--delete-existing-checkpoints",
         action="store_true",
         help="Delete existing iteration_*.pt checkpoints before training starts.",
@@ -343,5 +345,4 @@ if __name__ == "__main__":
         delete_existing_checkpoints=args.delete_existing_checkpoints,
         num_iterations=args.num_iterations,
         workers=args.workers,
-        evaluation_checkpoint_gap=args.evaluation_checkpoint_gap,
     )
