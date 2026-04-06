@@ -41,18 +41,6 @@ tensorboard --logdir tb_logs
 
 and open the provided local URL in your browser.
 
-## Evaluating the agent
-
-The evaluation script is `src/evaluate_CLI.py`. In the environment, you start an evaluation run with:
-
-```bash
-python -m src.evaluate_CLI
-```
-
-This script will automatically pick up all model checkpoints in `checkpoints/` and make them play against each other, _forever_, and rank them using an [Elo rating system](https://en.wikipedia.org/wiki/Elo_rating_system). At the end of each game between two models, their Elo ratings are updated.
-
-All of this can be monitored in real time using a local server that runs with the script.
-
 ## Playing against the agent
 
 The play script is `src/play_CLI.py`. In the environment, you start a play run with:
@@ -88,6 +76,14 @@ __Winrate against previous checkpoints__
 The three curves compare the latest checkpoint against checkpoints from __20__, __50__, and __100__ iterations earlier. As long as those winrates stay consistently above __0.5__, it means the model keeps improving.
 
 Interestingly, even though the models have been getting better pretty consistently throughout the entirety of the training run, the value loss has been going up all along, with the loss policy only starting to go down midway through the training. This is likely because, as the model keeps getting better, it fills its memory of self-played games with complex positions, which become harder to predict. So it is not the model getting worse, it is the training data getting harder. The checkpoint winrate curves confidently tell us that the model actually trained pretty well, from the beginning to the end.
+
+### Post training elo evaluation of all checkpoints
+
+During training, a checkpoint was saved every 10 iterations. After training, I used `python -m src.checkpoint_ranker_CLI` to rank all of those checkpoints, relatively to each other. The ranking is an elo system ranking. All models start with 500 elo points, and lose points as they lose, and earn point as they win. After more than a million total fights, the following ranking emerged:
+
+<img src="img/runs/big_run_1/checkpoint_ranks.png" alt="Ranked checkpoints" style="height:450px;"/>
+
+This chart is great, because it appears clear that models have kept getting better throughout virtually all the training duration. There are no signs of plateauing yet, and it appears we could make a better model in a future run.
 
 ## My mindset regarding AI assisted coding in this repository
 
