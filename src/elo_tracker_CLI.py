@@ -31,6 +31,7 @@ MIN_WORKERS = 1
 MAX_WORKERS = 24
 TRACKER_STATE_SCHEMA_VERSION = 1
 DEFAULT_SNAPSHOT_MIN_INTERVAL_S = 0.5
+DEFAULT_LIVE_REFRESH_INTERVAL_S = 0.1
 
 
 class LiveEloTracker:
@@ -40,6 +41,7 @@ class LiveEloTracker:
         checkpoint_dir: Path,
         *,
         resume_state_path: Path = DEFAULT_RESUME_STATE_PATH,
+        persist_resume_state: bool = False,
         num_simulations: int = 25,
         max_workers: int = 6,
         c_puct: float = 1.5,
@@ -48,12 +50,14 @@ class LiveEloTracker:
         matchup_min_weight: float = 0.05,
         snapshot_interval_matches: int = 10,
         snapshot_min_interval_s: float = DEFAULT_SNAPSHOT_MIN_INTERVAL_S,
+        live_refresh_interval_s: float = DEFAULT_LIVE_REFRESH_INTERVAL_S,
         checkpoint_stable_age_s: float = 2.0,
         idle_sleep_s: float = 1.0,
         max_tasks_per_child: int = 100,
     ):
         self.checkpoint_dir = checkpoint_dir
         self.resume_state_path = resume_state_path
+        self.persist_resume_state = persist_resume_state
         self.num_simulations = num_simulations
         self.requested_max_workers = self._normalize_max_workers(max_workers)
         self.active_max_workers = self.requested_max_workers
@@ -63,6 +67,7 @@ class LiveEloTracker:
         self.matchup_min_weight = matchup_min_weight
         self.snapshot_interval_matches = snapshot_interval_matches
         self.snapshot_min_interval_s = snapshot_min_interval_s
+        self.live_refresh_interval_s = live_refresh_interval_s
         self.checkpoint_stable_age_s = checkpoint_stable_age_s
         self.idle_sleep_s = idle_sleep_s
         self.max_tasks_per_child = max_tasks_per_child
@@ -81,6 +86,7 @@ class LiveEloTracker:
         self.snapshot_history = []
         self._next_snapshot_match_count = self.snapshot_interval_matches
         self._next_snapshot_time = time.perf_counter()
+        self._next_live_refresh_time = self._next_snapshot_time
         self._chart_version = 0
         self._chart_snapshot = self._build_chart_snapshot_unlocked()
         self._summary_snapshot = self._build_summary_snapshot_unlocked(
@@ -202,6 +208,9 @@ class LiveEloTracker:
         }
 
     def _persist_resume_state(self):
+        if not self.persist_resume_state:
+            return
+
         with self._lock:
             state = self._build_persisted_state_unlocked()
 
@@ -470,11 +479,17 @@ class LiveEloTracker:
             self.total_matches += 1
 
             self.last_update_at = datetime.now(timezone.utc).isoformat()
-            self._refresh_snapshots_unlocked()
-            if (
+            should_take_replay_snapshot = (
                 self.total_matches >= self._next_snapshot_match_count
                 and now >= self._next_snapshot_time
-            ):
+            )
+            should_refresh_live_snapshot = now >= self._next_live_refresh_time
+
+            if should_refresh_live_snapshot or should_take_replay_snapshot:
+                self._refresh_snapshots_unlocked()
+                self._next_live_refresh_time = now + self.live_refresh_interval_s
+
+            if should_take_replay_snapshot:
                 self.snapshot_history.append(self._chart_snapshot)
                 while self._next_snapshot_match_count <= self.total_matches:
                     self._next_snapshot_match_count += self.snapshot_interval_matches
@@ -623,6 +638,7 @@ def main():
     tracker = LiveEloTracker(
         checkpoint_dir=args.checkpoint_dir.resolve(),
         resume_state_path=DEFAULT_RESUME_STATE_PATH,
+        persist_resume_state=args.resume,
         num_simulations=args.num_simulations,
         max_workers=args.workers,
         c_puct=args.c_puct,
