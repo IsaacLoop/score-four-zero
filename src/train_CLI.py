@@ -28,6 +28,8 @@ def learning_rate_at_step(
 
 
 def format_learning_rate(value: float):
+    if value == 0.0:
+        return "0"
     return f"{value:.0e}".replace("e-0", "e-").replace("e+0", "e+")
 
 
@@ -98,8 +100,8 @@ def train(
     C_PUCT = 1.5
     DIRICHLET_ALPHA = 0.3
     DIRICHLET_EPSILON = 0.25
-    LEARNING_RATE = 3e-4
-    FINAL_LEARNING_RATE = 3e-5
+    LEARNING_RATE = 2e-4
+    FINAL_LEARNING_RATE = 0.0
     CHECKPOINT_EVERY_ITERATIONS = 10
     EVAL_CHECKPOINT_GAPS = (2, 5, 10)
     WEIGHT_DECAY = 1e-4
