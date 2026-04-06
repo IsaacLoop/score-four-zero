@@ -25,7 +25,7 @@ from .elo_parallel import (
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CHECKPOINT_DIR = PROJECT_ROOT / "checkpoints"
 DEFAULT_RESUME_STATE_PATH = PROJECT_ROOT / "artifacts" / "elo_tracker_resume_state.json"
-DASHBOARD_HTML_PATH = PROJECT_ROOT / "dashboard" / "elo_tracker_dashboard.html"
+DASHBOARD_HTML_PATH = PROJECT_ROOT / "dashboard" / "checkpoint_ranker_dashboard.html"
 WORKER_JS_PATH = PROJECT_ROOT / "dashboard" / "elo_chart_worker.js"
 MIN_WORKERS = 1
 MAX_WORKERS = 24
@@ -34,7 +34,7 @@ DEFAULT_SNAPSHOT_MIN_INTERVAL_S = 0.5
 DEFAULT_LIVE_REFRESH_INTERVAL_S = 0.1
 
 
-class LiveEloTracker:
+class LiveCheckpointRanker:
 
     def __init__(
         self,
@@ -126,10 +126,10 @@ class LiveEloTracker:
         try:
             state = json.loads(self.resume_state_path.read_text(encoding="utf-8"))
         except FileNotFoundError:
-            return False, "no saved tracker state"
+            return False, "no saved checkpoint ranker state"
         except (OSError, json.JSONDecodeError):
             self.delete_resume_state()
-            return False, "saved tracker state could not be read"
+            return False, "saved checkpoint ranker state could not be read"
 
         is_valid, reason, normalized_model_paths = self._validate_resume_state(state)
         if not is_valid:
@@ -158,17 +158,17 @@ class LiveEloTracker:
             self._next_snapshot_match_count = next_snapshot_match_count
             self._refresh_metadata_unlocked()
 
-        return True, "resumed previous tracker state"
+        return True, "resumed previous checkpoint ranker state"
 
     def _validate_resume_state(self, state):
         if not isinstance(state, dict):
-            return False, "saved tracker state is malformed", []
+            return False, "saved checkpoint ranker state is malformed", []
 
         if state.get("schema_version") != TRACKER_STATE_SCHEMA_VERSION:
-            return False, "saved tracker state schema changed", []
+            return False, "saved checkpoint ranker state schema changed", []
 
         if state.get("settings") != self._resume_settings_snapshot():
-            return False, "tracker settings changed since the saved run", []
+            return False, "checkpoint ranker settings changed since the saved run", []
 
         model_paths = state.get("model_paths")
         elos = state.get("elos")
@@ -176,13 +176,13 @@ class LiveEloTracker:
         snapshot_history = state.get("snapshot_history", [])
 
         if not isinstance(model_paths, list):
-            return False, "saved tracker state has invalid model paths", []
+            return False, "saved checkpoint ranker state has invalid model paths", []
         if not isinstance(elos, list) or not isinstance(fight_counts, list):
-            return False, "saved tracker state has invalid rating data", []
+            return False, "saved checkpoint ranker state has invalid rating data", []
         if len(model_paths) != len(elos) or len(model_paths) != len(fight_counts):
-            return False, "saved tracker state has inconsistent array lengths", []
+            return False, "saved checkpoint ranker state has inconsistent array lengths", []
         if not isinstance(snapshot_history, list):
-            return False, "saved tracker history is malformed", []
+            return False, "saved checkpoint ranker history is malformed", []
 
         normalized_model_paths = [str(Path(path).resolve()) for path in model_paths]
         current_paths = [str(path.resolve()) for path in self._checkpoint_paths()]
@@ -500,9 +500,9 @@ class LiveEloTracker:
             self._persist_resume_state()
 
 
-def make_handler(tracker: LiveEloTracker):
+def make_handler(ranker: LiveCheckpointRanker):
 
-    class EloTrackerHandler(BaseHTTPRequestHandler):
+    class CheckpointRankerHandler(BaseHTTPRequestHandler):
 
         def do_GET(self):
             parsed_url = urlsplit(self.path)
@@ -516,21 +516,21 @@ def make_handler(tracker: LiveEloTracker):
                 return
 
             if parsed_url.path == "/api/elo-state":
-                self._send_json(tracker.get_snapshot())
+                self._send_json(ranker.get_snapshot())
                 return
 
             if parsed_url.path == "/api/elo-live-chart":
-                self._send_json(tracker.get_chart_snapshot())
+                self._send_json(ranker.get_chart_snapshot())
                 return
 
             if parsed_url.path == "/api/elo-history":
                 query = parse_qs(parsed_url.query)
                 after = int(query.get("after", ["-1"])[0])
-                self._send_json(tracker.get_history(after=after))
+                self._send_json(ranker.get_history(after=after))
                 return
 
             if parsed_url.path == "/health":
-                snapshot = tracker.get_snapshot()
+                snapshot = ranker.get_snapshot()
                 self._send_json(
                     {
                         "status": "ok",
@@ -548,7 +548,7 @@ def make_handler(tracker: LiveEloTracker):
             if parsed_url.path == "/api/max-workers":
                 try:
                     payload = self._read_json()
-                    snapshot = tracker.set_max_workers(payload["max_workers"])
+                    snapshot = ranker.set_max_workers(payload["max_workers"])
                 except (KeyError, TypeError, json.JSONDecodeError):
                     self._send_json(
                         {"error": "Request body must be valid JSON with max_workers."},
@@ -604,11 +604,11 @@ def make_handler(tracker: LiveEloTracker):
             self.end_headers()
             self.wfile.write(body)
 
-    return EloTrackerHandler
+    return CheckpointRankerHandler
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Track checkpoint Elo live.")
+    parser = argparse.ArgumentParser(description="Rank checkpoints live with Elo.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--checkpoint-dir", type=Path, default=DEFAULT_CHECKPOINT_DIR)
@@ -624,7 +624,7 @@ def main():
     parser.add_argument(
         "--resume",
         action="store_true",
-        help="Resume the previous tracker run if the saved state still matches the checkpoint set and settings.",
+        help="Resume the previous checkpoint ranker run if the saved state still matches the checkpoint set and settings.",
     )
     args = parser.parse_args()
 
@@ -635,7 +635,7 @@ def main():
             f"--workers must be between {MIN_WORKERS} and {MAX_WORKERS}"
         )
 
-    tracker = LiveEloTracker(
+    ranker = LiveCheckpointRanker(
         checkpoint_dir=args.checkpoint_dir.resolve(),
         resume_state_path=DEFAULT_RESUME_STATE_PATH,
         persist_resume_state=args.resume,
@@ -651,30 +651,30 @@ def main():
     )
 
     if not args.resume:
-        tracker.delete_resume_state()
+        ranker.delete_resume_state()
     else:
-        resumed, resume_message = tracker.try_resume_previous_run()
+        resumed, resume_message = ranker.try_resume_previous_run()
         if resumed:
-            print("Resumed previous live Elo tracker state.")
+            print("Resumed previous live checkpoint ranker state.")
         else:
-            print(f"Starting fresh tracker state: {resume_message}.")
+            print(f"Starting fresh checkpoint ranker state: {resume_message}.")
 
     server = ThreadingHTTPServer(
         (args.host, args.port),
-        make_handler(tracker),
+        make_handler(ranker),
     )
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
 
-    print(f"Serving live Elo tracker at http://{args.host}:{args.port}")
+    print(f"Serving live checkpoint ranker at http://{args.host}:{args.port}")
     print(f"Watching checkpoints in {args.checkpoint_dir.resolve()}")
 
     try:
-        tracker.run_forever()
+        ranker.run_forever()
     except KeyboardInterrupt:
         pass
     finally:
-        tracker.stop()
+        ranker.stop()
         server.shutdown()
         server.server_close()
         server_thread.join(timeout=2.0)
