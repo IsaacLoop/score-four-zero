@@ -63,14 +63,49 @@ python -m src.play_CLI
 
 It automatically picks up the most advanced checkpoint in `checkpoints/` and lets you play against it in TUI. It is however possible to select a different checkpoint with the `--checkpoint` flag.
 
+## Model and training
+
+The model is a __592k-parameter__ __3D CNN policy-value network__. It was trained for __10,000__ iterations. Each iteration generates __32__ self-play games using Monte Carlo Tree Search (__MCTS__) with __100__ simulations per move, then performs __128__ gradient steps with batches of size __128__ sampled from a replay buffer of size __100,000__. The optimizer is __AdamW__, and the learning rate follows a cosine decay from __3e-4__ to __3e-5__ over the full training run.
+
+I used the following metrics to monitor training:
+
+__Policy loss__
+
+<img src="img/runs/big_run_1/loss_policy.png" alt="Policy loss" style="height:300px;" />
+
+The loss of the policy head.
+
+__Value loss__
+
+<img src="img/runs/big_run_1/loss_value.png" alt="Value loss" style="height:300px;" />
+
+The loss of the value head.
+
+__Winrate against previous checkpoints__
+
+<img src="img/runs/big_run_1/checkpoint_winrate.png" alt="Checkpoint winrate" style="height:300px;" />
+
+The three curves compare the latest checkpoint against checkpoints from __20__, __50__, and __100__ iterations earlier. As long as those winrates stay consistently above __0.5__, it means the model keeps improving.
+
+Interestingly, even though the models have been getting better pretty consistently throughout the entirety of the training run, the value loss has been going up all along, with the loss policy only starting to go down midway through the training. This is likely because, as the model keeps getting better, it fills its memory of self-played games with complex positions, which become harder to predict. So it is not the model getting worse, it is the training data getting harder. The checkpoint winrate curves confidently tell us that the model actually trained pretty well, from the beginning to the end.
+
 ## My mindset regarding AI assisted coding in this repository
 
 This repository is made both for me to showcase my capabilities as a data scientist and for me to deeply understand something new. Hence, every part of the code that is critical to the ML concepts is of course hand-coded by me, without any AI assistance. I did, however, use GPT-5.4 through OpenAI's Codex to write some non-critical parts of the project, such as the Elo visualization server and some optimizations for parallelizing some stuff. None of that was beyond the reach of a motivated developer, but those non-ML aspects just weren't the point of the project. Anything made with AI is advertised as such in the codebase.
 
 ## Observations
 
-The agent extremely quickly reaches a state where it is seemingly unbeatable by me. As of right now, I have not yet seen declining rates of improvement, but I have only trained it for a few hours. I will update this section as I train it more and see how it evolves. It is fascinating to see that the elo ratings of the checkpoints seems to increase linearly with the duration of training. It just seems remarkably stable and predictable, which is not that common in deep RL.
+The agent extremely quickly reaches a state where it becomes genuinely challenging for me. I can still beat it with some effort, but it already feels like an above average opponent. As of right now, I have not yet seen declining rates of improvement, but I have only trained it for a few hours. I will update this section as I train it more and see how it evolves. It is fascinating to see that the elo ratings of the checkpoints seems to increase linearly with the duration of training. It just seems remarkably stable and predictable, which is not that common in deep RL.
 
 Making a true pipeline training an agent using self-play / MCTS / deep learning should not be that hard. This very humble project is a great proof of that. All of the critical and somewhat complex code is located in `src/MCTS.py` and in `src/train_CLI.py`, which total less than 500 uncompacted lines of code. I found a terrible lack of clear explanations and resources to replicate AlphaZero-like projects, so I hope that this repository can be useful to _you_.
 
 As of right now, almost all of the hyperparameters used for training (number of iterations, games per iteration, training cycles per iteration, depth of tree exploration, size of the model, learning rate, learning rate scheduling, etc) have been chosen arbitrarily, based on my feeling of what would be reasonable, and worked well enough. That is to say, a great deal of optimization is probably still possible.
+
+## Next steps
+
+Our model is not superhuman yet. Next steps could be:
+
+- __Important__: use a few models from that first serious batch to use as elo anchors when it comes to evaluating future models
+- Train for longer, find a plateau
+- Make the model bigger
+- Increase MCTS simulations
