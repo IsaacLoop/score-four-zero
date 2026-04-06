@@ -32,6 +32,7 @@ MAX_WORKERS = 24
 TRACKER_STATE_SCHEMA_VERSION = 1
 DEFAULT_SNAPSHOT_MIN_INTERVAL_S = 0.5
 DEFAULT_LIVE_REFRESH_INTERVAL_S = 0.1
+DEFAULT_FIGHT_TASK_BATCH_SIZE = 8
 
 
 class LiveCheckpointRanker:
@@ -78,9 +79,13 @@ class LiveCheckpointRanker:
         self.model_paths = []
         self.elos = []
         self.fight_counts = []
+        self.recent_avg_elo_last_100 = []
+        self.recent_avg_elo_warmup_counts = []
         self._known_model_paths = set()
 
         self.total_matches = 0
+        self.cached_match_results_total = 0
+        self.uncached_match_results_total = 0
         self.started_at = datetime.now(timezone.utc).isoformat()
         self.last_update_at = None
         self.snapshot_history = []
@@ -88,6 +93,7 @@ class LiveCheckpointRanker:
         self._next_snapshot_time = time.perf_counter()
         self._next_live_refresh_time = self._next_snapshot_time
         self._chart_version = 0
+        self.fight_task_batch_size = DEFAULT_FIGHT_TASK_BATCH_SIZE
         self._chart_snapshot = self._build_chart_snapshot_unlocked()
         self._summary_snapshot = self._build_summary_snapshot_unlocked(
             self._chart_snapshot
@@ -140,8 +146,16 @@ class LiveCheckpointRanker:
             self.model_paths = normalized_model_paths
             self.elos = [float(elo) for elo in state["elos"]]
             self.fight_counts = [int(count) for count in state["fight_counts"]]
+            self.recent_avg_elo_last_100 = [float(elo) for elo in self.elos]
+            self.recent_avg_elo_warmup_counts = [0 for _ in self.model_paths]
             self._known_model_paths = set(self.model_paths)
             self.total_matches = int(state["total_matches"])
+            self.cached_match_results_total = int(
+                state.get("cached_match_results_total", 0)
+            )
+            self.uncached_match_results_total = int(
+                state.get("uncached_match_results_total", 0)
+            )
             self.started_at = state.get("started_at") or self.started_at
             self.last_update_at = state.get("last_update_at")
             self.snapshot_history = list(state.get("snapshot_history", []))
@@ -199,6 +213,8 @@ class LiveCheckpointRanker:
             "started_at": self.started_at,
             "last_update_at": self.last_update_at,
             "total_matches": int(self.total_matches),
+            "cached_match_results_total": int(self.cached_match_results_total),
+            "uncached_match_results_total": int(self.uncached_match_results_total),
             "next_snapshot_match_count": int(self._next_snapshot_match_count),
             "chart_version": int(self._chart_version),
             "model_paths": list(self.model_paths),
@@ -268,11 +284,14 @@ class LiveCheckpointRanker:
                         max_workers=desired_workers,
                         c_puct=self.c_puct,
                         max_tasks_per_child=self.max_tasks_per_child,
+                        task_batch_size=self.fight_task_batch_size,
                     )
                     fight_pool.open()
                     self._set_active_max_workers(desired_workers)
 
-                batch = self._sample_batch(batch_size=desired_workers)
+                batch = self._sample_batch(
+                    batch_size=desired_workers * self.fight_task_batch_size
+                )
                 if not batch:
                     time.sleep(self.idle_sleep_s)
                     continue
@@ -283,11 +302,14 @@ class LiveCheckpointRanker:
                 ]
 
                 try:
-                    for matchup_index, result in fight_pool.iter_fight_path_results(
+                    batch_results = []
+                    for matchup_index, result, from_cache in fight_pool.iter_fight_path_results(
                         path_matchups,
                         desc=None,
+                        include_cache_status=True,
                     ):
-                        self._apply_single_result(batch[matchup_index], result)
+                        batch_results.append((batch[matchup_index], result, from_cache))
+                    self._apply_batch_results(batch_results)
                 except Exception as exc:
                     print(f"Match batch failed: {exc}")
                     time.sleep(self.idle_sleep_s)
@@ -341,12 +363,15 @@ class LiveCheckpointRanker:
         snapshot.update(
             {
                 "total_matches": int(self.total_matches),
+                "cached_match_results_total": int(self.cached_match_results_total),
+                "uncached_match_results_total": int(self.uncached_match_results_total),
                 "mean_elo": mean_elo,
                 "max_elo": max_elo,
                 "elo_k": float(self.elo_k),
                 "requested_max_workers": int(self.requested_max_workers),
                 "active_max_workers": int(self.active_max_workers),
                 "fight_counts": [int(count) for count in self.fight_counts],
+                "recent_avg_elo_last_100": list(self.recent_avg_elo_last_100),
                 "fight_count_mean": fight_count_mean,
                 "fight_count_p01": fight_count_p01,
                 "fight_count_median": fight_count_median,
@@ -365,7 +390,7 @@ class LiveCheckpointRanker:
         return {
             key: value
             for key, value in chart_snapshot.items()
-            if key not in {"model_iterations", "elos", "fight_counts"}
+            if key not in {"model_iterations", "elos", "fight_counts", "recent_avg_elo_last_100"}
         }
 
     def _refresh_snapshots_unlocked(self):
@@ -425,6 +450,8 @@ class LiveCheckpointRanker:
                 self.model_paths.append(normalized_path)
                 self.elos.append(initial_elo)
                 self.fight_counts.append(0)
+                self.recent_avg_elo_last_100.append(float(initial_elo))
+                self.recent_avg_elo_warmup_counts.append(0)
                 self.last_update_at = datetime.now(timezone.utc).isoformat()
                 self._refresh_snapshots_unlocked()
                 should_persist = True
@@ -461,22 +488,32 @@ class LiveCheckpointRanker:
                 return self.model_paths[idx2], self.model_paths[idx1]
             return self.model_paths[idx1], self.model_paths[idx2]
 
-    def _apply_single_result(self, sample, result):
-        idx1, idx2, swapped = sample
+    def _apply_batch_results(self, batch_results):
+        if not batch_results:
+            return
+
         should_persist = False
         now = time.perf_counter()
 
         with self._lock:
-            normalized_result = remap_fight_result(result, swapped)
-            self.elos[idx1], self.elos[idx2] = compute_new_elos(
-                self.elos[idx1],
-                self.elos[idx2],
-                normalized_result,
-                k=self.elo_k,
-            )
-            self.fight_counts[idx1] += 1
-            self.fight_counts[idx2] += 1
-            self.total_matches += 1
+            for sample, result, from_cache in batch_results:
+                idx1, idx2, swapped = sample
+                normalized_result = remap_fight_result(result, swapped)
+                self.elos[idx1], self.elos[idx2] = compute_new_elos(
+                    self.elos[idx1],
+                    self.elos[idx2],
+                    normalized_result,
+                    k=self.elo_k,
+                )
+                self.fight_counts[idx1] += 1
+                self.fight_counts[idx2] += 1
+                self.total_matches += 1
+                if from_cache:
+                    self.cached_match_results_total += 1
+                else:
+                    self.uncached_match_results_total += 1
+                self._record_recent_elo_unlocked(idx1)
+                self._record_recent_elo_unlocked(idx2)
 
             self.last_update_at = datetime.now(timezone.utc).isoformat()
             should_take_replay_snapshot = (
@@ -490,7 +527,13 @@ class LiveCheckpointRanker:
                 self._next_live_refresh_time = now + self.live_refresh_interval_s
 
             if should_take_replay_snapshot:
-                self.snapshot_history.append(self._chart_snapshot)
+                self.snapshot_history.append(
+                    {
+                        key: value
+                        for key, value in self._chart_snapshot.items()
+                        if key != "recent_avg_elo_last_100"
+                    }
+                )
                 while self._next_snapshot_match_count <= self.total_matches:
                     self._next_snapshot_match_count += self.snapshot_interval_matches
                 self._next_snapshot_time = now + self.snapshot_min_interval_s
@@ -498,6 +541,24 @@ class LiveCheckpointRanker:
 
         if should_persist:
             self._persist_resume_state()
+
+    def _record_recent_elo_unlocked(self, model_index: int):
+        current_elo = float(self.elos[model_index])
+        warmup_count = self.recent_avg_elo_warmup_counts[model_index]
+
+        if warmup_count < 100:
+            next_count = warmup_count + 1
+            previous_average = self.recent_avg_elo_last_100[model_index]
+            self.recent_avg_elo_last_100[model_index] = (
+                previous_average * warmup_count + current_elo
+            ) / next_count
+            self.recent_avg_elo_warmup_counts[model_index] = next_count
+            return
+
+        self.recent_avg_elo_last_100[model_index] = (
+            self.recent_avg_elo_last_100[model_index] * 0.99
+            + current_elo * 0.01
+        )
 
 
 def make_handler(ranker: LiveCheckpointRanker):

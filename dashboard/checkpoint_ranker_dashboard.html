@@ -661,6 +661,17 @@
           </div>
         </div>
         <div class="panel stat">
+          <div class="stat-label">Fight Cache</div>
+          <div class="stat-table">
+            <div class="stat-table-label">Hit rate</div>
+            <div class="stat-table-value" id="cache-hit-rate-value">-</div>
+            <div class="stat-table-label">Cached /s</div>
+            <div class="stat-table-value" id="cached-matches-rate-value">-</div>
+            <div class="stat-table-label">Uncached /s</div>
+            <div class="stat-table-value" id="uncached-matches-rate-value">-</div>
+          </div>
+        </div>
+        <div class="panel stat">
           <div class="stat-label">Tracked Models</div>
           <div class="stat-value" id="num-models-value">-</div>
         </div>
@@ -675,6 +686,7 @@
               <div class="stat-subvalue" id="tracked-checkpoint-number">No checkpoint selected</div>
               <div class="tracked-meta-line" id="tracked-checkpoint-elo"></div>
               <div class="tracked-meta-line" id="tracked-checkpoint-fights"></div>
+              <div class="tracked-meta-line" id="tracked-checkpoint-recent-avg"></div>
               <div class="stat-note" id="tracked-checkpoint-note">Click a checkpoint dot to track it.</div>
             </div>
             <button id="clear-tracked-checkpoint" class="stat-button" type="button" hidden>Stop tracking</button>
@@ -830,7 +842,11 @@
     const trackedCheckpointNumber = document.getElementById("tracked-checkpoint-number");
     const trackedCheckpointElo = document.getElementById("tracked-checkpoint-elo");
     const trackedCheckpointFights = document.getElementById("tracked-checkpoint-fights");
+    const trackedCheckpointRecentAvg = document.getElementById("tracked-checkpoint-recent-avg");
     const trackedCheckpointNote = document.getElementById("tracked-checkpoint-note");
+    const cacheHitRateValue = document.getElementById("cache-hit-rate-value");
+    const cachedMatchesRateValue = document.getElementById("cached-matches-rate-value");
+    const uncachedMatchesRateValue = document.getElementById("uncached-matches-rate-value");
     const fightCountP01Value = document.getElementById("fight-count-p01-value");
     const fightCountMeanValue = document.getElementById("fight-count-mean-value");
     const fightCountMedianValue = document.getElementById("fight-count-median-value");
@@ -1060,6 +1076,7 @@
         iteration: snapshot.model_iterations[checkpointIndex],
         elo: snapshot.elos?.[checkpointIndex],
         fights: snapshot.fight_counts?.[checkpointIndex] ?? 0,
+        recentAvgElo: snapshot.recent_avg_elo_last_100?.[checkpointIndex] ?? null,
         missing: false,
       };
     }
@@ -1070,6 +1087,7 @@
         trackedCheckpointNumber.textContent = "Disabled in minimal mode";
         trackedCheckpointElo.textContent = "";
         trackedCheckpointFights.textContent = "";
+        trackedCheckpointRecentAvg.textContent = "";
         trackedCheckpointNote.textContent = "Turn off minimal mode to track individual checkpoints.";
         clearTrackedCheckpointButton.hidden = true;
         return;
@@ -1082,6 +1100,7 @@
         trackedCheckpointNumber.textContent = "No checkpoint selected";
         trackedCheckpointElo.textContent = "";
         trackedCheckpointFights.textContent = "";
+        trackedCheckpointRecentAvg.textContent = "";
         trackedCheckpointNote.textContent = "Click a checkpoint dot to track it.";
         clearTrackedCheckpointButton.hidden = true;
         clearTrackedCheckpointButton.disabled = false;
@@ -1097,12 +1116,16 @@
       if (!trackedCheckpoint || trackedCheckpoint.missing) {
         trackedCheckpointElo.textContent = "";
         trackedCheckpointFights.textContent = "";
+        trackedCheckpointRecentAvg.textContent = "";
         trackedCheckpointNote.textContent = "Not present in this snapshot.";
         return;
       }
 
       trackedCheckpointElo.textContent = `Elo: ${formatNumber(trackedCheckpoint.elo)}`;
       trackedCheckpointFights.textContent = `Fights: ${formatInteger(trackedCheckpoint.fights)}`;
+      trackedCheckpointRecentAvg.textContent = trackedCheckpoint.recentAvgElo === null
+        ? "Avg Elo (100): -"
+        : `Avg Elo (100): ${formatNumber(trackedCheckpoint.recentAvgElo)}`;
     }
 
     function updateWorkerCountCard(snapshot = currentSummary) {
@@ -1196,6 +1219,16 @@
       });
     }
 
+    function formatPercent(value, digits = 1) {
+      if (value === null || value === undefined || Number.isNaN(value)) {
+        return "-";
+      }
+      return `${(Number(value) * 100).toLocaleString("en-US", {
+        minimumFractionDigits: digits,
+        maximumFractionDigits: digits,
+      })}%`;
+    }
+
     function recordMatchRateSample(snapshot, nowMs = Date.now()) {
       const totalMatches = Number(snapshot?.total_matches ?? Number.NaN);
       if (!Number.isFinite(totalMatches)) {
@@ -1214,6 +1247,8 @@
 
       matchRateSamples.push({
         totalMatches,
+        cachedMatches: Number(snapshot?.cached_match_results_total ?? 0),
+        uncachedMatches: Number(snapshot?.uncached_match_results_total ?? 0),
         timeMs: nowMs,
       });
 
@@ -1226,14 +1261,14 @@
       }
     }
 
-    function interpolateTimeForMatchCount(targetMatches) {
+    function interpolateSampleForMatchCount(targetMatches) {
       if (!matchRateSamples.length) {
         return null;
       }
 
       const firstSample = matchRateSamples[0];
       if (targetMatches <= firstSample.totalMatches) {
-        return firstSample.timeMs;
+        return { ...firstSample };
       }
 
       for (let sampleIndex = 1; sampleIndex < matchRateSamples.length; sampleIndex += 1) {
@@ -1241,7 +1276,7 @@
         const currentSample = matchRateSamples[sampleIndex];
 
         if (targetMatches === currentSample.totalMatches) {
-          return currentSample.timeMs;
+          return { ...currentSample };
         }
 
         if (
@@ -1255,14 +1290,25 @@
 
           const mix =
             (targetMatches - previousSample.totalMatches) / matchSpan;
-          return previousSample.timeMs + mix * (currentSample.timeMs - previousSample.timeMs);
+          return {
+            totalMatches: targetMatches,
+            cachedMatches:
+              previousSample.cachedMatches
+              + mix * (currentSample.cachedMatches - previousSample.cachedMatches),
+            uncachedMatches:
+              previousSample.uncachedMatches
+              + mix * (currentSample.uncachedMatches - previousSample.uncachedMatches),
+            timeMs:
+              previousSample.timeMs + mix * (currentSample.timeMs - previousSample.timeMs),
+          };
         }
       }
 
-      return matchRateSamples[matchRateSamples.length - 1]?.timeMs ?? null;
+      const lastSample = matchRateSamples[matchRateSamples.length - 1] ?? null;
+      return lastSample ? { ...lastSample } : null;
     }
 
-    function computeRecentMatchRate() {
+    function computeRecentMatchStats() {
       if (matchRateSamples.length < 2) {
         return null;
       }
@@ -1273,15 +1319,27 @@
         earliestSample.totalMatches,
         latestSample.totalMatches - matchRateWindowMatches,
       );
-      const startTimeMs = interpolateTimeForMatchCount(targetMatches);
+      const startSample = interpolateSampleForMatchCount(targetMatches);
       const elapsedMatches = latestSample.totalMatches - targetMatches;
-      const elapsedTimeMs = latestSample.timeMs - (startTimeMs ?? latestSample.timeMs);
+      const elapsedTimeMs = latestSample.timeMs - (startSample?.timeMs ?? latestSample.timeMs);
 
       if (elapsedMatches <= 0 || elapsedTimeMs <= 0) {
         return null;
       }
 
-      return elapsedMatches / (elapsedTimeMs / 1000);
+      const elapsedSeconds = elapsedTimeMs / 1000;
+      const cachedMatches =
+        latestSample.cachedMatches - (startSample?.cachedMatches ?? latestSample.cachedMatches);
+      const uncachedMatches =
+        latestSample.uncachedMatches - (startSample?.uncachedMatches ?? latestSample.uncachedMatches);
+      const totalDelta = cachedMatches + uncachedMatches;
+
+      return {
+        totalRate: elapsedMatches / elapsedSeconds,
+        cachedRate: cachedMatches < 0 ? null : cachedMatches / elapsedSeconds,
+        uncachedRate: uncachedMatches < 0 ? null : uncachedMatches / elapsedSeconds,
+        cacheHitRate: totalDelta > 0 ? cachedMatches / totalDelta : null,
+      };
     }
 
     function makeTicks(minValue, maxValue, tickCount = 6) {
@@ -1387,6 +1445,7 @@
         iteration: Number(chartData.iterations[pointIndex]),
         elo: Number(chartData.elos[pointIndex]),
         fights: Number(chartData.fightCounts[pointIndex] ?? 0),
+        recentAvgElo: chartData.recentAvgElos?.[pointIndex] ?? null,
         label: chartData.labels?.[pointIndex] ?? "",
       };
     }
@@ -1510,8 +1569,11 @@
 
     function showTooltipForPoint(container, tooltip, point) {
       const labelPrefix = point.label ? `${point.label} · ` : "";
+      const recentAvgSegment = point.recentAvgElo === null || point.recentAvgElo === undefined
+        ? ""
+        : `, avg100 ${formatNumber(point.recentAvgElo)}`;
       tooltip.textContent =
-        `${labelPrefix}checkpoint ${formatInteger(point.iteration)}, elo ${formatNumber(point.elo)}, fights ${formatInteger(point.fights)}`;
+        `${labelPrefix}checkpoint ${formatInteger(point.iteration)}, elo ${formatNumber(point.elo)}, fights ${formatInteger(point.fights)}${recentAvgSegment}`;
       tooltip.style.display = "block";
       updateTooltipPosition(container, tooltip, hoveredPointer);
     }
@@ -1802,6 +1864,7 @@
       iterations,
       elos,
       fightCounts,
+      recentAvgElos,
       trackedIteration = null,
     ) {
       const pointCount = Math.min(iterations.length, elos.length);
@@ -1810,6 +1873,7 @@
           iterations: [],
           elos: [],
           fightCounts: [],
+          recentAvgElos: [],
           labels: [],
           kinds: [],
         };
@@ -1818,6 +1882,7 @@
       const highlightIterations = [];
       const highlightElos = [];
       const highlightFightCounts = [];
+      const highlightRecentAvgElos = [];
       const highlightLabels = [];
       const highlightKinds = [];
       const includedIndices = new Set();
@@ -1831,6 +1896,11 @@
         highlightIterations.push(Number(iterations[pointIndex]));
         highlightElos.push(Number(elos[pointIndex]));
         highlightFightCounts.push(Number(fightCounts[pointIndex] ?? 0));
+        highlightRecentAvgElos.push(
+          Number.isFinite(Number(recentAvgElos?.[pointIndex]))
+            ? Number(recentAvgElos[pointIndex])
+            : null,
+        );
         highlightLabels.push(label);
         highlightKinds.push(kind);
       };
@@ -1864,6 +1934,7 @@
         iterations: highlightIterations,
         elos: highlightElos,
         fightCounts: highlightFightCounts,
+        recentAvgElos: highlightRecentAvgElos,
         labels: highlightLabels,
         kinds: highlightKinds,
       };
@@ -1873,6 +1944,7 @@
       const iterations = snapshot?.model_iterations ?? [];
       const elos = snapshot?.elos ?? [];
       const fightCounts = snapshot?.fight_counts ?? [];
+      const recentAvgElos = snapshot?.recent_avg_elo_last_100 ?? [];
       const reducedSeries = buildMinimalModeSeries(
         iterations,
         elos,
@@ -1882,6 +1954,7 @@
         iterations,
         elos,
         fightCounts,
+        recentAvgElos,
         trackedCheckpointIteration,
       );
 
@@ -1922,6 +1995,7 @@
           iterations: [],
           elos: [],
           fightCounts: [],
+          recentAvgElos: [],
           labels: [],
           kinds: [],
         };
@@ -1943,6 +2017,15 @@
           rightHighlights.fightCounts,
           mix,
         ).map((fightCount) => Math.round(fightCount)),
+        recentAvgElos:
+          leftHighlights.recentAvgElos.length >= pointCount
+          && rightHighlights.recentAvgElos.length >= pointCount
+            ? interpolateNumericArrays(
+              leftHighlights.recentAvgElos,
+              rightHighlights.recentAvgElos,
+              mix,
+            )
+            : Array.from({ length: pointCount }, () => null),
         labels: rightHighlights.labels.slice(0, pointCount),
         kinds: rightHighlights.kinds.slice(0, pointCount),
       };
@@ -2041,6 +2124,7 @@
           interactiveIterations: interpolatedHighlights.iterations,
           interactiveElos: interpolatedHighlights.elos,
           interactiveFightCounts: interpolatedHighlights.fightCounts,
+          interactiveRecentAvgElos: interpolatedHighlights.recentAvgElos,
           interactiveLabels: interpolatedHighlights.labels,
           latestIteration: null,
           showMovingAverage: true,
@@ -2074,6 +2158,7 @@
           interactiveIterations: iterations,
           interactiveElos: elos,
           interactiveFightCounts: fightCounts,
+          interactiveRecentAvgElos: snapshot?.recent_avg_elo_last_100 ?? [],
           interactiveLabels: [],
           latestIteration,
           showMovingAverage: movingAverageCheckbox.checked,
@@ -2121,6 +2206,7 @@
         interactiveIterations: highlights.iterations,
         interactiveElos: highlights.elos,
         interactiveFightCounts: highlights.fightCounts,
+        interactiveRecentAvgElos: highlights.recentAvgElos,
         interactiveLabels: highlights.labels,
         latestIteration: null,
         showMovingAverage: true,
@@ -3254,6 +3340,7 @@
         iterations: renderModel.interactiveIterations,
         elos: renderModel.interactiveElos,
         fightCounts: renderModel.interactiveFightCounts,
+        recentAvgElos: renderModel.interactiveRecentAvgElos,
         labels: renderModel.interactiveLabels,
         cx: new Float32Array(pointCount),
         cy: new Float32Array(pointCount),
@@ -3380,6 +3467,9 @@
         document.getElementById("num-models-value").textContent = "-";
         totalMatchesValue.textContent = "-";
         totalMatchesRate.textContent = "";
+        cacheHitRateValue.textContent = "-";
+        cachedMatchesRateValue.textContent = "-";
+        uncachedMatchesRateValue.textContent = "-";
         document.getElementById("elo-k-value").textContent = "-";
         document.getElementById("mean-elo-value").textContent = "-";
         fightCountP01Value.textContent = "-";
@@ -3394,12 +3484,26 @@
 
       document.getElementById("num-models-value").textContent = formatInteger(snapshot.num_models);
       totalMatchesValue.textContent = formatScientificInteger(snapshot.total_matches);
-      const liveRate =
+      const recentMatchStats =
         !isReplayActive() && (followLatestCheckbox.checked || snapshot === currentSummary)
-          ? computeRecentMatchRate()
+          ? computeRecentMatchStats()
           : null;
       totalMatchesRate.textContent =
-        liveRate === null ? "" : ` (${formatNumber(liveRate)} matches per second)`;
+        recentMatchStats?.totalRate === undefined || recentMatchStats?.totalRate === null
+          ? ""
+          : ` (${formatNumber(recentMatchStats.totalRate)} matches per second)`;
+      cacheHitRateValue.textContent = recentMatchStats?.cacheHitRate === undefined
+        || recentMatchStats?.cacheHitRate === null
+        ? "-"
+        : formatPercent(recentMatchStats.cacheHitRate);
+      cachedMatchesRateValue.textContent = recentMatchStats?.cachedRate === undefined
+        || recentMatchStats?.cachedRate === null
+        ? "-"
+        : formatNumber(recentMatchStats.cachedRate);
+      uncachedMatchesRateValue.textContent = recentMatchStats?.uncachedRate === undefined
+        || recentMatchStats?.uncachedRate === null
+        ? "-"
+        : formatNumber(recentMatchStats.uncachedRate);
       document.getElementById("elo-k-value").textContent = formatNumber(snapshot.elo_k);
       document.getElementById("mean-elo-value").textContent = formatNumber(snapshot.mean_elo);
       fightCountP01Value.textContent = formatNumber(snapshot.fight_count_p01);

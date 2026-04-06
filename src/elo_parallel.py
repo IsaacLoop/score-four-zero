@@ -2,7 +2,7 @@
 Entirely vibe-coded file (gpt-5.4 xhigh reasoning).
 """
 
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from multiprocessing import get_context
 
 import numpy as np
@@ -74,6 +74,10 @@ def _fight_worker(model_path_1: str, model_path_2: str):
             env.step(action)
 
     return env.winner()
+
+
+def _fight_worker_batch(path_matchups):
+    return [_fight_worker(model_path_1, model_path_2) for model_path_1, model_path_2 in path_matchups]
 
 
 def compute_new_elos(elo1, elo2, result, k=20.0):
@@ -149,12 +153,14 @@ class ParallelFightPool:
         max_workers: int = 24,
         c_puct: float = 1.5,
         max_tasks_per_child: int = 100,
+        task_batch_size: int = 1,
     ):
         self.model_paths = tuple(str(path) for path in model_paths)
         self.num_simulations = num_simulations
         self.max_workers = max_workers
         self.c_puct = c_puct
         self.max_tasks_per_child = max_tasks_per_child
+        self.task_batch_size = max(1, int(task_batch_size))
         self.executor = None
         self.result_cache = {}
 
@@ -205,12 +211,15 @@ class ParallelFightPool:
         desc: str | None = "Fights",
         position: int | None = None,
         leave: bool = False,
+        include_cache_status: bool = False,
     ):
         if self.executor is None:
             raise RuntimeError("ParallelFightPool must be opened before use.")
 
         cached_results = []
-        future_to_matchup = {}
+        future_to_chunk = {}
+        uncached_chunk = []
+        uncached_chunks = []
 
         for matchup_index, path_matchup in enumerate(path_matchups):
             cached_result = self.result_cache.get(path_matchup)
@@ -218,8 +227,13 @@ class ParallelFightPool:
                 cached_results.append((matchup_index, cached_result))
                 continue
 
-            future = self.executor.submit(_fight_worker, *path_matchup)
-            future_to_matchup[future] = (matchup_index, path_matchup)
+            uncached_chunk.append((matchup_index, path_matchup))
+            if len(uncached_chunk) >= self.task_batch_size:
+                uncached_chunks.append(list(uncached_chunk))
+                uncached_chunk.clear()
+
+        if uncached_chunk:
+            uncached_chunks.append(list(uncached_chunk))
 
         progress_bar = None
         if desc is not None:
@@ -234,15 +248,51 @@ class ParallelFightPool:
             for matchup_index, cached_result in cached_results:
                 if progress_bar is not None:
                     progress_bar.update(1)
-                yield matchup_index, cached_result
+                if include_cache_status:
+                    yield matchup_index, cached_result, True
+                else:
+                    yield matchup_index, cached_result
 
-            for future in as_completed(future_to_matchup):
-                matchup_index, path_matchup = future_to_matchup[future]
-                result = future.result()
-                self.result_cache[path_matchup] = result
-                if progress_bar is not None:
-                    progress_bar.update(1)
-                yield matchup_index, result
+            next_chunk_to_submit = 0
+
+            while (
+                next_chunk_to_submit < len(uncached_chunks)
+                and len(future_to_chunk) < self.max_workers
+            ):
+                chunk = uncached_chunks[next_chunk_to_submit]
+                chunk_path_matchups = [path_matchup for _, path_matchup in chunk]
+                future = self.executor.submit(_fight_worker_batch, chunk_path_matchups)
+                future_to_chunk[future] = chunk
+                next_chunk_to_submit += 1
+
+            while future_to_chunk:
+                done_futures, _ = wait(
+                    tuple(future_to_chunk),
+                    return_when=FIRST_COMPLETED,
+                )
+                for future in done_futures:
+                    chunk = future_to_chunk.pop(future)
+                    results = future.result()
+                    for (matchup_index, path_matchup), result in zip(chunk, results):
+                        self.result_cache[path_matchup] = result
+                        if progress_bar is not None:
+                            progress_bar.update(1)
+                        if include_cache_status:
+                            yield matchup_index, result, False
+                        else:
+                            yield matchup_index, result
+
+                    if next_chunk_to_submit < len(uncached_chunks):
+                        next_chunk = uncached_chunks[next_chunk_to_submit]
+                        next_chunk_path_matchups = [
+                            path_matchup for _, path_matchup in next_chunk
+                        ]
+                        next_future = self.executor.submit(
+                            _fight_worker_batch,
+                            next_chunk_path_matchups,
+                        )
+                        future_to_chunk[next_future] = next_chunk
+                        next_chunk_to_submit += 1
         finally:
             if progress_bar is not None:
                 progress_bar.close()
