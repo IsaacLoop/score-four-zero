@@ -11,7 +11,7 @@ from tqdm import tqdm
 
 from .Env import Env
 from .MCTS import MCTS
-from .PolicyValueModel import PolicyValueModel
+from .models import PVModel
 
 _WORKER_NUM_SIMULATIONS = None
 _WORKER_C_PUCT = None
@@ -66,7 +66,7 @@ def _split_games_across_workers(total_games: int, num_workers: int):
     ]
 
 
-def _cpu_model_state_dict(model: PolicyValueModel):
+def _cpu_model_state_dict(model: PVModel):
     return {
         parameter_name: parameter.detach().cpu().numpy().copy()
         for parameter_name, parameter in model.state_dict().items()
@@ -105,7 +105,7 @@ def _play_self_play_games_worker(
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    model = PolicyValueModel()
+    model = PVModel()
     model.load_state_dict(
         {
             parameter_name: torch.from_numpy(parameter_value)
@@ -187,7 +187,7 @@ class ParallelSelfPlayPool:
 
     def generate_examples(
         self,
-        model: PolicyValueModel,
+        model: PVModel,
         total_games: int,
         num_sampling_moves: int,
         iteration: int,

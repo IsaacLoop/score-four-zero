@@ -1,9 +1,10 @@
 import torch
 
-from .Game import BOARD_SIZE
+from ..Game import BOARD_SIZE
+from .AbstractPVModel import AbstractPVModel
 
 
-class PolicyValueModel(torch.nn.Module):
+class PVModel(AbstractPVModel):
 
     def __init__(self):
         super().__init__()

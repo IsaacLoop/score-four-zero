@@ -6,8 +6,8 @@ import torch
 
 from src.Env import Env
 from src.MCTS import MCTS
-from src.PolicyValueModel import PolicyValueModel
 from src.elo_history import checkpoint_iteration
+from src.models import PVModel
 from src.views import AsciiView
 
 
@@ -35,7 +35,7 @@ def play_vs_ai(checkpoint="last"):
     NUM_SIMULATIONS = 25
     DEVICE = "cpu"
 
-    model = PolicyValueModel().to(DEVICE)
+    model = PVModel().to(DEVICE)
     model.load_state_dict(
         torch.load(checkpoint_path, map_location=DEVICE)["model_state_dict"]
     )

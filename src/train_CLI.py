@@ -10,9 +10,9 @@ from torch.optim import AdamW
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-from .PolicyValueModel import PolicyValueModel
 from .ReplayBuffer import ReplayBuffer
 from .elo_parallel import ParallelFightPool, remap_fight_result
+from .models import PVModel
 from .self_play_parallel import ParallelSelfPlayPool
 
 
@@ -119,7 +119,7 @@ def train(
         shutil.rmtree(TENSORBOARD_DIR)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = PolicyValueModel().to(device)
+    model = PVModel().to(device)
     trainable_parameters = sum(
         parameter.numel() for parameter in model.parameters() if parameter.requires_grad
     )

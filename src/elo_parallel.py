@@ -11,7 +11,7 @@ from tqdm import tqdm
 
 from .Env import Env
 from .MCTS import MCTS
-from .PolicyValueModel import PolicyValueModel
+from .models import PVModel
 
 _WORKER_MODEL_CACHE = {}
 _WORKER_NUM_SIMULATIONS = None
@@ -36,7 +36,7 @@ def _get_cached_model(model_path: str):
     model = _WORKER_MODEL_CACHE.get(model_path)
     if model is None:
         checkpoint = torch.load(model_path, map_location="cpu")
-        model = PolicyValueModel()
+        model = PVModel()
         model.load_state_dict(checkpoint["model_state_dict"])
         model.eval()
         _WORKER_MODEL_CACHE[model_path] = model

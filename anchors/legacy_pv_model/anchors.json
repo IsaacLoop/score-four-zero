@@ -1,0 +1,46 @@
+{
+  "anchors": [
+    {
+      "run": 1,
+      "checkpoint": "run_1_elo_724.9.pt",
+      "iteration": 8880,
+      "elo": 724.9
+    },
+    {
+      "run": 1,
+      "checkpoint": "run_1_elo_653.0.pt",
+      "iteration": 9990,
+      "elo": 653.0
+    },
+    {
+      "run": 1,
+      "checkpoint": "run_1_elo_597.1.pt",
+      "iteration": 7730,
+      "elo": 597.1
+    },
+    {
+      "run": 1,
+      "checkpoint": "run_1_elo_558.3.pt",
+      "iteration": 6480,
+      "elo": 558.3
+    },
+    {
+      "run": 1,
+      "checkpoint": "run_1_elo_498.6.pt",
+      "iteration": 5400,
+      "elo": 498.6
+    },
+    {
+      "run": 1,
+      "checkpoint": "run_1_elo_447.7.pt",
+      "iteration": 2170,
+      "elo": 447.7
+    },
+    {
+      "run": 1,
+      "checkpoint": "run_1_elo_411.8.pt",
+      "iteration": 620,
+      "elo": 411.8
+    }
+  ]
+}
