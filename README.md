@@ -14,7 +14,7 @@ If no player manages to have aligned 4 beads when the board is full, then it's a
 
 ## Goals of the project
 
-My ambition is to train an agent to play Score Four better than any human ever could, using the same principles as that of AlphaZero (self-play, Monte Carlo Tree Search, and a _kinda deep_ neural network).
+My ambition is to train an agent to play Score Four at a very high level, using the same principles as that of AlphaZero (self-play, Monte Carlo Tree Search, and a _kinda deep_ neural network).
 
 ## Environment
 
@@ -43,13 +43,17 @@ and open the provided local URL in your browser.
 
 ## Playing against the agent
 
-The play script is `src/play_CLI.py`. In the environment, you start a play run with:
+The play script is `src/play_vs_ai_CLI.py`. In the environment, you start a play run with:
 
 ```bash
-python -m src.play_CLI
+python -m src.play_vs_ai_CLI
 ```
 
-It automatically picks up the most advanced checkpoint in `checkpoints/` and lets you play against it in TUI. It is however possible to select a different checkpoint with the `--checkpoint` flag.
+It automatically picks up the latest checkpoint in `checkpoints/` and lets you play against it in TUI. It is however possible to select a different checkpoint by passing its iteration number as a positional argument, for example:
+
+```bash
+python -m src.play_vs_ai_CLI 500
+```
 
 ## Model and training
 
