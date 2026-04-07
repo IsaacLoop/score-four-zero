@@ -148,6 +148,7 @@ function drawChart(payload) {
     bandUpperElos = [],
     whiskerLowerElos = [],
     whiskerUpperElos = [],
+    anchorElos = [],
     latestIteration,
     movingAverageWindowSize,
     showMovingAverage,
@@ -203,6 +204,19 @@ function drawChart(payload) {
     }
     if (x > maxX) {
       maxX = x;
+    }
+    if (y < minY) {
+      minY = y;
+    }
+    if (y > maxY) {
+      maxY = y;
+    }
+  }
+
+  for (const anchorElo of anchorElos) {
+    const y = Number(anchorElo);
+    if (!Number.isFinite(y)) {
+      continue;
     }
     if (y < minY) {
       minY = y;

@@ -25,6 +25,8 @@ from .elo_parallel import (
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CHECKPOINT_DIR = PROJECT_ROOT / "checkpoints"
 DEFAULT_RESUME_STATE_PATH = PROJECT_ROOT / "artifacts" / "elo_tracker_resume_state.json"
+DEFAULT_ANCHOR_DIR = PROJECT_ROOT / "anchors" / "legacy_pv_model"
+DEFAULT_ANCHOR_MANIFEST_PATH = DEFAULT_ANCHOR_DIR / "anchors.json"
 DASHBOARD_HTML_PATH = PROJECT_ROOT / "dashboard" / "checkpoint_ranker_dashboard.html"
 WORKER_JS_PATH = PROJECT_ROOT / "dashboard" / "elo_chart_worker.js"
 MIN_WORKERS = 1
@@ -33,6 +35,38 @@ TRACKER_STATE_SCHEMA_VERSION = 1
 DEFAULT_SNAPSHOT_MIN_INTERVAL_S = 0.5
 DEFAULT_LIVE_REFRESH_INTERVAL_S = 0.1
 DEFAULT_FIGHT_TASK_BATCH_SIZE = 8
+DEFAULT_ANCHOR_FIGHT_PROBABILITY = 0.01
+
+
+def load_legacy_anchors():
+    try:
+        manifest = json.loads(DEFAULT_ANCHOR_MANIFEST_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(
+            f"Legacy anchor manifest not found at {DEFAULT_ANCHOR_MANIFEST_PATH}"
+        ) from exc
+
+    anchor_entries = manifest.get("anchors")
+    if not isinstance(anchor_entries, list):
+        raise ValueError("Legacy anchor manifest is malformed.")
+
+    anchors = []
+    for anchor_entry in anchor_entries:
+        checkpoint_name = anchor_entry["checkpoint"]
+        checkpoint_path = (DEFAULT_ANCHOR_DIR / checkpoint_name).resolve()
+        if not checkpoint_path.is_file():
+            raise FileNotFoundError(f"Legacy anchor checkpoint not found: {checkpoint_path}")
+
+        anchors.append(
+            {
+                "name": Path(checkpoint_name).stem,
+                "path": str(checkpoint_path),
+                "iteration": int(anchor_entry["iteration"]),
+                "elo": float(anchor_entry["elo"]),
+            }
+        )
+
+    return anchors
 
 
 class LiveCheckpointRanker:
@@ -76,6 +110,14 @@ class LiveCheckpointRanker:
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
 
+        self.anchors = load_legacy_anchors()
+        self.anchor_names = [anchor["name"] for anchor in self.anchors]
+        self.anchor_paths = [anchor["path"] for anchor in self.anchors]
+        self.anchor_iterations = [anchor["iteration"] for anchor in self.anchors]
+        self.anchor_elos = [anchor["elo"] for anchor in self.anchors]
+        self.anchor_fight_probability = DEFAULT_ANCHOR_FIGHT_PROBABILITY
+        self.anchor_match_results_total = 0
+
         self.model_paths = []
         self.elos = []
         self.fight_counts = []
@@ -108,6 +150,19 @@ class LiveCheckpointRanker:
             "matchup_distance_scale": float(self.matchup_distance_scale),
             "matchup_min_weight": float(self.matchup_min_weight),
             "snapshot_interval_matches": int(self.snapshot_interval_matches),
+            "anchors": [
+                {
+                    "path": path,
+                    "iteration": int(iteration),
+                    "elo": float(elo),
+                }
+                for path, iteration, elo in zip(
+                    self.anchor_paths,
+                    self.anchor_iterations,
+                    self.anchor_elos,
+                )
+            ],
+            "anchor_fight_probability": float(self.anchor_fight_probability),
         }
 
     @staticmethod
@@ -155,6 +210,9 @@ class LiveCheckpointRanker:
             )
             self.uncached_match_results_total = int(
                 state.get("uncached_match_results_total", 0)
+            )
+            self.anchor_match_results_total = int(
+                state.get("anchor_match_results_total", 0)
             )
             self.started_at = state.get("started_at") or self.started_at
             self.last_update_at = state.get("last_update_at")
@@ -215,6 +273,7 @@ class LiveCheckpointRanker:
             "total_matches": int(self.total_matches),
             "cached_match_results_total": int(self.cached_match_results_total),
             "uncached_match_results_total": int(self.uncached_match_results_total),
+            "anchor_match_results_total": int(self.anchor_match_results_total),
             "next_snapshot_match_count": int(self._next_snapshot_match_count),
             "chart_version": int(self._chart_version),
             "model_paths": list(self.model_paths),
@@ -365,6 +424,7 @@ class LiveCheckpointRanker:
                 "total_matches": int(self.total_matches),
                 "cached_match_results_total": int(self.cached_match_results_total),
                 "uncached_match_results_total": int(self.uncached_match_results_total),
+                "anchor_match_results_total": int(self.anchor_match_results_total),
                 "mean_elo": mean_elo,
                 "max_elo": max_elo,
                 "elo_k": float(self.elo_k),
@@ -382,6 +442,11 @@ class LiveCheckpointRanker:
                 "last_update_at": self.last_update_at,
                 "snapshot_interval_matches": int(self.snapshot_interval_matches),
                 "chart_version": int(self._chart_version),
+                "num_anchors": len(self.anchor_paths),
+                "anchor_fight_probability": float(self.anchor_fight_probability),
+                "anchor_names": list(self.anchor_names),
+                "anchor_iterations": [int(iteration) for iteration in self.anchor_iterations],
+                "anchor_elos": [float(elo) for elo in self.anchor_elos],
             }
         )
         return snapshot
@@ -390,7 +455,16 @@ class LiveCheckpointRanker:
         return {
             key: value
             for key, value in chart_snapshot.items()
-            if key not in {"model_iterations", "elos", "fight_counts", "recent_avg_elo_last_100"}
+            if key
+            not in {
+                "model_iterations",
+                "elos",
+                "fight_counts",
+                "recent_avg_elo_last_100",
+                "anchor_names",
+                "anchor_iterations",
+                "anchor_elos",
+            }
         }
 
     def _refresh_snapshots_unlocked(self):
@@ -470,20 +544,40 @@ class LiveCheckpointRanker:
 
             batch = []
             for _ in range(batch_size):
-                idx1, idx2 = sample_matchup(
+                idx1 = int(np.random.randint(len(self.model_paths)))
+                swapped = bool(np.random.rand() < 0.5)
+                if self.anchor_paths and np.random.rand() < self.anchor_fight_probability:
+                    anchor_idx = self._closest_anchor_index_unlocked(idx1)
+                    batch.append(("anchor", idx1, anchor_idx, swapped))
+                    continue
+
+                _, idx2 = sample_matchup(
                     self.elos,
                     distance_scale=self.matchup_distance_scale,
                     min_weight=self.matchup_min_weight,
+                    forced_idx1=idx1,
                 )
-                swapped = bool(np.random.rand() < 0.5)
-                batch.append((idx1, idx2, swapped))
+                batch.append(("model", idx1, idx2, swapped))
 
             return batch
 
+    def _closest_anchor_index_unlocked(self, model_index: int):
+        current_elo = float(self.elos[model_index])
+        closest_anchor_index = min(
+            range(len(self.anchor_elos)),
+            key=lambda anchor_index: abs(self.anchor_elos[anchor_index] - current_elo),
+        )
+        return int(closest_anchor_index)
+
     def _path_matchup_from_sample(self, sample):
-        idx1, idx2, swapped = sample
+        sample_kind, idx1, idx2, swapped = sample
 
         with self._lock:
+            if sample_kind == "anchor":
+                if swapped:
+                    return self.anchor_paths[idx2], self.model_paths[idx1]
+                return self.model_paths[idx1], self.anchor_paths[idx2]
+
             if swapped:
                 return self.model_paths[idx2], self.model_paths[idx1]
             return self.model_paths[idx1], self.model_paths[idx2]
@@ -497,23 +591,34 @@ class LiveCheckpointRanker:
 
         with self._lock:
             for sample, result, from_cache in batch_results:
-                idx1, idx2, swapped = sample
+                sample_kind, idx1, idx2, swapped = sample
                 normalized_result = remap_fight_result(result, swapped)
-                self.elos[idx1], self.elos[idx2] = compute_new_elos(
-                    self.elos[idx1],
-                    self.elos[idx2],
-                    normalized_result,
-                    k=self.elo_k,
-                )
-                self.fight_counts[idx1] += 1
-                self.fight_counts[idx2] += 1
+                if sample_kind == "anchor":
+                    self.elos[idx1] = compute_new_elos(
+                        self.elos[idx1],
+                        self.anchor_elos[idx2],
+                        normalized_result,
+                        k=self.elo_k,
+                    )[0]
+                    self.fight_counts[idx1] += 1
+                    self.anchor_match_results_total += 1
+                else:
+                    self.elos[idx1], self.elos[idx2] = compute_new_elos(
+                        self.elos[idx1],
+                        self.elos[idx2],
+                        normalized_result,
+                        k=self.elo_k,
+                    )
+                    self.fight_counts[idx1] += 1
+                    self.fight_counts[idx2] += 1
                 self.total_matches += 1
                 if from_cache:
                     self.cached_match_results_total += 1
                 else:
                     self.uncached_match_results_total += 1
                 self._record_recent_elo_unlocked(idx1)
-                self._record_recent_elo_unlocked(idx2)
+                if sample_kind != "anchor":
+                    self._record_recent_elo_unlocked(idx2)
 
             self.last_update_at = datetime.now(timezone.utc).isoformat()
             should_take_replay_snapshot = (

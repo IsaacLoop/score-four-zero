@@ -19,6 +19,7 @@
       --chart-bg: #ffffff;
       --chart-line: #1f77b4;
       --chart-best: #d62728;
+      --chart-anchor: #c47b14;
       --chart-latest: #2ca02c;
       --chart-worst: #f59e0b;
       --chart-muted: #8f8f8f;
@@ -43,6 +44,7 @@
       --chart-bg: #141922;
       --chart-line: #68a9ff;
       --chart-best: #ff6b6b;
+      --chart-anchor: #ffb84d;
       --chart-latest: #56d88b;
       --chart-worst: #ffbf5a;
       --chart-muted: #748194;
@@ -451,6 +453,15 @@
       box-shadow: 0 0 0 2px var(--chart-average);
     }
 
+    .chart-highlight-dot.anchor {
+      width: 10px;
+      height: 10px;
+      margin-left: -5px;
+      margin-top: -5px;
+      background: var(--chart-anchor);
+      box-shadow: 0 0 0 2px var(--panel-bg);
+    }
+
     .chart-tooltip {
       position: absolute;
       display: none;
@@ -543,6 +554,7 @@
     }
 
     .chart-legend-swatch.best-dot::before,
+    .chart-legend-swatch.anchor-dot::before,
     .chart-legend-swatch.latest-dot::before,
     .chart-legend-swatch.worst-dot::before,
     .chart-legend-swatch.tracked-dot::before {
@@ -555,6 +567,15 @@
 
     .chart-legend-swatch.best-dot::before {
       background: var(--chart-best);
+    }
+
+    .chart-legend-swatch.anchor-dot::before {
+      left: 7px;
+      top: 0;
+      width: 10px;
+      height: 10px;
+      background: var(--chart-anchor);
+      box-shadow: 0 0 0 2px var(--panel-bg);
     }
 
     .chart-legend-swatch.latest-dot::before {
@@ -669,6 +690,19 @@
             <div class="stat-table-value" id="cached-matches-rate-value">-</div>
             <div class="stat-table-label">Uncached /s</div>
             <div class="stat-table-value" id="uncached-matches-rate-value">-</div>
+          </div>
+        </div>
+        <div class="panel stat">
+          <div class="stat-label">Anchoring</div>
+          <div class="stat-table">
+            <div class="stat-table-label">Anchors</div>
+            <div class="stat-table-value" id="anchor-count-value">-</div>
+            <div class="stat-table-label">Target rate</div>
+            <div class="stat-table-value" id="anchor-target-rate-value">-</div>
+            <div class="stat-table-label">Actual rate</div>
+            <div class="stat-table-value" id="anchor-actual-rate-value">-</div>
+            <div class="stat-table-label">Anchor fights</div>
+            <div class="stat-table-value" id="anchor-total-value">-</div>
           </div>
         </div>
         <div class="panel stat">
@@ -847,6 +881,10 @@
     const cacheHitRateValue = document.getElementById("cache-hit-rate-value");
     const cachedMatchesRateValue = document.getElementById("cached-matches-rate-value");
     const uncachedMatchesRateValue = document.getElementById("uncached-matches-rate-value");
+    const anchorCountValue = document.getElementById("anchor-count-value");
+    const anchorTargetRateValue = document.getElementById("anchor-target-rate-value");
+    const anchorActualRateValue = document.getElementById("anchor-actual-rate-value");
+    const anchorTotalValue = document.getElementById("anchor-total-value");
     const fightCountP01Value = document.getElementById("fight-count-p01-value");
     const fightCountMeanValue = document.getElementById("fight-count-mean-value");
     const fightCountMedianValue = document.getElementById("fight-count-median-value");
@@ -1187,6 +1225,7 @@
         chartBg: styles.getPropertyValue("--chart-bg").trim(),
         chartLine: styles.getPropertyValue("--chart-line").trim(),
         chartBest: styles.getPropertyValue("--chart-best").trim(),
+        chartAnchor: styles.getPropertyValue("--chart-anchor").trim(),
         chartLatest: styles.getPropertyValue("--chart-latest").trim(),
         chartWorst: styles.getPropertyValue("--chart-worst").trim(),
         chartMuted: styles.getPropertyValue("--chart-muted").trim(),
@@ -1249,6 +1288,7 @@
         totalMatches,
         cachedMatches: Number(snapshot?.cached_match_results_total ?? 0),
         uncachedMatches: Number(snapshot?.uncached_match_results_total ?? 0),
+        anchorMatches: Number(snapshot?.anchor_match_results_total ?? 0),
         timeMs: nowMs,
       });
 
@@ -1298,6 +1338,9 @@
             uncachedMatches:
               previousSample.uncachedMatches
               + mix * (currentSample.uncachedMatches - previousSample.uncachedMatches),
+            anchorMatches:
+              previousSample.anchorMatches
+              + mix * (currentSample.anchorMatches - previousSample.anchorMatches),
             timeMs:
               previousSample.timeMs + mix * (currentSample.timeMs - previousSample.timeMs),
           };
@@ -1332,6 +1375,8 @@
         latestSample.cachedMatches - (startSample?.cachedMatches ?? latestSample.cachedMatches);
       const uncachedMatches =
         latestSample.uncachedMatches - (startSample?.uncachedMatches ?? latestSample.uncachedMatches);
+      const anchorMatches =
+        latestSample.anchorMatches - (startSample?.anchorMatches ?? latestSample.anchorMatches);
       const totalDelta = cachedMatches + uncachedMatches;
 
       return {
@@ -1339,6 +1384,8 @@
         cachedRate: cachedMatches < 0 ? null : cachedMatches / elapsedSeconds,
         uncachedRate: uncachedMatches < 0 ? null : uncachedMatches / elapsedSeconds,
         cacheHitRate: totalDelta > 0 ? cachedMatches / totalDelta : null,
+        anchorRate: anchorMatches < 0 ? null : anchorMatches / elapsedSeconds,
+        anchorHitRate: elapsedMatches > 0 ? anchorMatches / elapsedMatches : null,
       };
     }
 
@@ -1444,9 +1491,14 @@
         cy: chartData.cy[pointIndex],
         iteration: Number(chartData.iterations[pointIndex]),
         elo: Number(chartData.elos[pointIndex]),
-        fights: Number(chartData.fightCounts[pointIndex] ?? 0),
+        fights: chartData.fightCounts[pointIndex] === null || chartData.fightCounts[pointIndex] === undefined
+          ? null
+          : Number(chartData.fightCounts[pointIndex]),
         recentAvgElo: chartData.recentAvgElos?.[pointIndex] ?? null,
         label: chartData.labels?.[pointIndex] ?? "",
+        name: chartData.names?.[pointIndex] ?? "",
+        kind: chartData.kinds?.[pointIndex] ?? "checkpoint",
+        selectable: Boolean(chartData.selectable?.[pointIndex] ?? false),
       };
     }
 
@@ -1568,6 +1620,13 @@
     }
 
     function showTooltipForPoint(container, tooltip, point) {
+      if (point.kind === "anchor") {
+        tooltip.textContent = `anchor ${point.name}, elo ${formatNumber(point.elo)}`;
+        tooltip.style.display = "block";
+        updateTooltipPosition(container, tooltip, hoveredPointer);
+        return;
+      }
+
       const labelPrefix = point.label ? `${point.label} · ` : "";
       const recentAvgSegment = point.recentAvgElo === null || point.recentAvgElo === undefined
         ? ""
@@ -2129,6 +2188,18 @@
           latestIteration: null,
           showMovingAverage: true,
           trackedCheckpointIteration,
+          anchorIterations:
+            leftSnapshot?.anchor_iterations
+            ?? rightSnapshot?.anchor_iterations
+            ?? [],
+          anchorElos:
+            leftSnapshot?.anchor_elos
+            ?? rightSnapshot?.anchor_elos
+            ?? [],
+          anchorNames:
+            leftSnapshot?.anchor_names
+            ?? rightSnapshot?.anchor_names
+            ?? [],
           highlightIterations: interpolatedHighlights.iterations,
           highlightElos: interpolatedHighlights.elos,
           highlightKinds: interpolatedHighlights.kinds,
@@ -2163,6 +2234,9 @@
           latestIteration,
           showMovingAverage: movingAverageCheckbox.checked,
           trackedCheckpointIteration,
+          anchorIterations: snapshot?.anchor_iterations ?? [],
+          anchorElos: snapshot?.anchor_elos ?? [],
+          anchorNames: snapshot?.anchor_names ?? [],
           highlightIterations: [],
           highlightElos: [],
           highlightKinds: [],
@@ -2211,13 +2285,22 @@
         latestIteration: null,
         showMovingAverage: true,
         trackedCheckpointIteration,
+        anchorIterations: snapshot?.anchor_iterations ?? [],
+        anchorElos: snapshot?.anchor_elos ?? [],
+        anchorNames: snapshot?.anchor_names ?? [],
         highlightIterations: highlights.iterations,
         highlightElos: highlights.elos,
         highlightKinds: highlights.kinds,
       };
     }
 
-    function buildChartLayout(iterations, elos, width, height) {
+    function buildChartLayout(
+      iterations,
+      elos,
+      width,
+      height,
+      { extraIterations = [], extraElos = [] } = {},
+    ) {
       const padding = {
         top: Math.max(20, Math.round(height * 0.03)),
         right: Math.max(18, Math.round(width * 0.02)),
@@ -2244,6 +2327,32 @@
         }
         if (x > maxX) {
           maxX = x;
+        }
+        if (y < minY) {
+          minY = y;
+        }
+        if (y > maxY) {
+          maxY = y;
+        }
+      }
+
+      for (const extraIteration of extraIterations) {
+        const x = Number(extraIteration);
+        if (!Number.isFinite(x)) {
+          continue;
+        }
+        if (x < minX) {
+          minX = x;
+        }
+        if (x > maxX) {
+          maxX = x;
+        }
+      }
+
+      for (const extraElo of extraElos) {
+        const y = Number(extraElo);
+        if (!Number.isFinite(y)) {
+          continue;
         }
         if (y < minY) {
           minY = y;
@@ -2296,18 +2405,18 @@
       };
     }
 
-    function syncMinimalModeHighlightDots(container, chartData, highlightKinds) {
+    function syncChartOverlayMarkers(container, markers) {
       const overlay = container._chartOverlay ?? null;
       if (!overlay) {
         return;
       }
 
-      if (!minimalModeCheckbox.checked || !chartData?.iterations?.length) {
+      if (!markers.length) {
         overlay.replaceChildren();
         return;
       }
 
-      const pointCount = chartData.iterations.length;
+      const pointCount = markers.length;
       while (overlay.children.length < pointCount) {
         const dot = document.createElement("div");
         dot.className = "chart-highlight-dot";
@@ -2319,9 +2428,9 @@
 
       for (let pointIndex = 0; pointIndex < pointCount; pointIndex += 1) {
         const dot = overlay.children[pointIndex];
-        dot.className = `chart-highlight-dot ${highlightKinds[pointIndex]}`;
-        dot.style.left = `${chartData.cx[pointIndex]}px`;
-        dot.style.top = `${chartData.cy[pointIndex]}px`;
+        dot.className = `chart-highlight-dot ${markers[pointIndex].kind}`;
+        dot.style.left = `${markers[pointIndex].x}px`;
+        dot.style.top = `${markers[pointIndex].y}px`;
         dot.style.opacity = "1";
       }
     }
@@ -2340,6 +2449,9 @@
           { swatch: "whisker", label: "10th-90th" },
           { swatch: "best-dot", label: "Best checkpoint" },
         );
+        if (renderModel?.anchorIterations?.length) {
+          legendEntries.push({ swatch: "anchor-dot", label: "Anchors" });
+        }
         if (trackedCheckpointIteration !== null) {
           legendEntries.push({ swatch: "tracked-dot", label: "Tracked checkpoint" });
         }
@@ -2352,6 +2464,9 @@
           { swatch: "best-dot", label: "Best checkpoint" },
           { swatch: "latest-dot", label: "Latest checkpoint" },
         );
+        if (renderModel?.anchorIterations?.length) {
+          legendEntries.push({ swatch: "anchor-dot", label: "Anchors" });
+        }
         if (trackedCheckpointIteration !== null) {
           legendEntries.push({ swatch: "tracked-dot", label: "Tracked checkpoint" });
         }
@@ -3237,7 +3352,7 @@
           : null;
         const targetPoint = point ?? fallbackPoint;
 
-        if (!targetPoint) {
+        if (!targetPoint || !targetPoint.selectable) {
           return;
         }
 
@@ -3273,6 +3388,9 @@
       const bandUpperElos = renderModel?.bandUpperElos ?? [];
       const whiskerLowerElos = renderModel?.whiskerLowerElos ?? [];
       const whiskerUpperElos = renderModel?.whiskerUpperElos ?? [];
+      const anchorIterations = renderModel?.anchorIterations ?? [];
+      const anchorElos = renderModel?.anchorElos ?? [];
+      const anchorNames = renderModel?.anchorNames ?? [];
 
       if (!renderModel || !lineIterations.length || !lineElos.length) {
         if (container._chartWorker) {
@@ -3325,6 +3443,9 @@
         renderModel.layoutElos,
         width,
         height,
+        {
+          extraElos: anchorElos,
+        },
       );
       const {
         xToCanvas,
@@ -3335,26 +3456,99 @@
       canvas.style.width = `${width}px`;
       canvas.style.height = `${height}px`;
       const showMovingAverage = renderModel.showMovingAverage;
-      const pointCount = renderModel.interactiveIterations.length;
+      const axisX = layout.padding.left;
+      const axisY = height - layout.padding.bottom;
+      const interactivePoints = [];
+
+      for (let pointIndex = 0; pointIndex < renderModel.interactiveIterations.length; pointIndex += 1) {
+        interactivePoints.push({
+          iteration: Number(renderModel.interactiveIterations[pointIndex]),
+          elo: Number(renderModel.interactiveElos[pointIndex]),
+          fights: Number(renderModel.interactiveFightCounts[pointIndex] ?? 0),
+          recentAvgElo: renderModel.interactiveRecentAvgElos?.[pointIndex] ?? null,
+          label: renderModel.interactiveLabels?.[pointIndex] ?? "",
+          name: "",
+          kind: "checkpoint",
+          selectable: !renderModel.minimalModeEnabled,
+          cx: xToCanvas(Number(renderModel.interactiveIterations[pointIndex])),
+          cy: yToCanvas(Number(renderModel.interactiveElos[pointIndex])),
+        });
+      }
+
+      const anchorCount = Math.min(anchorIterations.length, anchorElos.length, anchorNames.length);
+      for (let anchorIndex = 0; anchorIndex < anchorCount; anchorIndex += 1) {
+        interactivePoints.push({
+          iteration: Number(anchorIterations[anchorIndex]),
+          elo: Number(anchorElos[anchorIndex]),
+          fights: null,
+          recentAvgElo: null,
+          label: "Anchor",
+          name: String(anchorNames[anchorIndex]),
+          kind: "anchor",
+          selectable: false,
+          cx: axisX,
+          cy: yToCanvas(Number(anchorElos[anchorIndex])),
+        });
+      }
+
+      interactivePoints.sort((leftPoint, rightPoint) => {
+        if (leftPoint.cx !== rightPoint.cx) {
+          return leftPoint.cx - rightPoint.cx;
+        }
+        return leftPoint.cy - rightPoint.cy;
+      });
+
+      const pointCount = interactivePoints.length;
       const chartData = {
-        iterations: renderModel.interactiveIterations,
-        elos: renderModel.interactiveElos,
-        fightCounts: renderModel.interactiveFightCounts,
-        recentAvgElos: renderModel.interactiveRecentAvgElos,
-        labels: renderModel.interactiveLabels,
+        iterations: new Array(pointCount),
+        elos: new Array(pointCount),
+        fightCounts: new Array(pointCount),
+        recentAvgElos: new Array(pointCount),
+        labels: new Array(pointCount),
+        names: new Array(pointCount),
+        kinds: new Array(pointCount),
+        selectable: new Array(pointCount),
         cx: new Float32Array(pointCount),
         cy: new Float32Array(pointCount),
       };
       const pointIndexByIteration = new Map();
       for (let pointIndex = 0; pointIndex < pointCount; pointIndex += 1) {
-        chartData.cx[pointIndex] = xToCanvas(Number(chartData.iterations[pointIndex]));
-        chartData.cy[pointIndex] = yToCanvas(Number(chartData.elos[pointIndex]));
-        pointIndexByIteration.set(Number(chartData.iterations[pointIndex]), pointIndex);
+        const point = interactivePoints[pointIndex];
+        chartData.iterations[pointIndex] = point.iteration;
+        chartData.elos[pointIndex] = point.elo;
+        chartData.fightCounts[pointIndex] = point.fights;
+        chartData.recentAvgElos[pointIndex] = point.recentAvgElo;
+        chartData.labels[pointIndex] = point.label;
+        chartData.names[pointIndex] = point.name;
+        chartData.kinds[pointIndex] = point.kind;
+        chartData.selectable[pointIndex] = point.selectable;
+        chartData.cx[pointIndex] = point.cx;
+        chartData.cy[pointIndex] = point.cy;
+        if (point.kind === "checkpoint") {
+          pointIndexByIteration.set(point.iteration, pointIndex);
+        }
       }
 
       container._chartData = chartData;
       container._chartPointIndexByIteration = pointIndexByIteration;
-      syncMinimalModeHighlightDots(container, chartData, renderModel.highlightKinds);
+      const overlayMarkers = [];
+      for (let anchorIndex = 0; anchorIndex < anchorCount; anchorIndex += 1) {
+        overlayMarkers.push({
+          kind: "anchor",
+          x: axisX,
+          y: yToCanvas(Number(anchorElos[anchorIndex])),
+        });
+      }
+      if (renderModel.minimalModeEnabled) {
+        for (let highlightIndex = 0; highlightIndex < renderModel.highlightIterations.length; highlightIndex += 1) {
+          overlayMarkers.push({
+            kind: renderModel.highlightKinds[highlightIndex],
+            x: xToCanvas(Number(renderModel.highlightIterations[highlightIndex])),
+            y: yToCanvas(Number(renderModel.highlightElos[highlightIndex])),
+          });
+        }
+      }
+      syncChartOverlayMarkers(container, overlayMarkers);
       syncChartLegend(container, renderModel);
       syncChartLegendPosition(container, layout, width, height);
 
@@ -3393,6 +3587,7 @@
           highlightIterations: renderModel.highlightIterations,
           highlightElos: renderModel.highlightElos,
           highlightKinds: renderModel.highlightKinds,
+          anchorElos,
           themeColors,
         });
         restoreHoveredTooltip(container, tooltip);
@@ -3470,6 +3665,10 @@
         cacheHitRateValue.textContent = "-";
         cachedMatchesRateValue.textContent = "-";
         uncachedMatchesRateValue.textContent = "-";
+        anchorCountValue.textContent = "-";
+        anchorTargetRateValue.textContent = "-";
+        anchorActualRateValue.textContent = "-";
+        anchorTotalValue.textContent = "-";
         document.getElementById("elo-k-value").textContent = "-";
         document.getElementById("mean-elo-value").textContent = "-";
         fightCountP01Value.textContent = "-";
@@ -3504,6 +3703,13 @@
         || recentMatchStats?.uncachedRate === null
         ? "-"
         : formatNumber(recentMatchStats.uncachedRate);
+      anchorCountValue.textContent = formatInteger(snapshot.num_anchors);
+      anchorTargetRateValue.textContent = formatPercent(snapshot.anchor_fight_probability);
+      anchorActualRateValue.textContent =
+        recentMatchStats?.anchorHitRate === undefined || recentMatchStats?.anchorHitRate === null
+          ? "-"
+          : `${formatPercent(recentMatchStats.anchorHitRate)} (${formatNumber(recentMatchStats.anchorRate)}/s)`;
+      anchorTotalValue.textContent = formatInteger(snapshot.anchor_match_results_total);
       document.getElementById("elo-k-value").textContent = formatNumber(snapshot.elo_k);
       document.getElementById("mean-elo-value").textContent = formatNumber(snapshot.mean_elo);
       fightCountP01Value.textContent = formatNumber(snapshot.fight_count_p01);

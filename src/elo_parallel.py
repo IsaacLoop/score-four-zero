@@ -4,6 +4,7 @@ Entirely vibe-coded file (gpt-5.4 xhigh reasoning).
 
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from multiprocessing import get_context
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -11,11 +12,12 @@ from tqdm import tqdm
 
 from .Env import Env
 from .MCTS import MCTS
-from .models import PVModel
+from .models import LegacyPVModel, PVModel
 
 _WORKER_MODEL_CACHE = {}
 _WORKER_NUM_SIMULATIONS = None
 _WORKER_C_PUCT = None
+_LEGACY_ANCHOR_DIR = (Path(__file__).resolve().parent.parent / "anchors" / "legacy_pv_model").resolve()
 
 
 def _init_fight_worker(num_simulations: int, c_puct: float):
@@ -36,7 +38,11 @@ def _get_cached_model(model_path: str):
     model = _WORKER_MODEL_CACHE.get(model_path)
     if model is None:
         checkpoint = torch.load(model_path, map_location="cpu")
-        model = PVModel()
+        resolved_model_path = Path(model_path).resolve()
+        if resolved_model_path.parent == _LEGACY_ANCHOR_DIR:
+            model = LegacyPVModel()
+        else:
+            model = PVModel()
         model.load_state_dict(checkpoint["model_state_dict"])
         model.eval()
         _WORKER_MODEL_CACHE[model_path] = model
