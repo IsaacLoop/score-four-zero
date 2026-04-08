@@ -1,4 +1,5 @@
 from collections import deque
+import random
 import numpy as np
 
 
@@ -21,8 +22,7 @@ class ReplayBuffer:
         assert (
             batch_size <= len(self.data)
         ), "Not enough examples in the buffer to sample a batch."
-        indices = np.random.choice(len(self.data), size=batch_size, replace=False)
-        batch = [self.data[i] for i in indices]
+        batch = random.sample(self.data, batch_size)
 
         x_batch = np.stack([b[0] for b in batch])
         pi_batch = np.stack([b[1] for b in batch])

@@ -319,6 +319,16 @@ def train(
 
             saved_checkpoint_paths.append(checkpoint_path)
 
+    final_checkpoint_step = NUM_ITERATIONS
+    final_checkpoint_path = CHECKPOINT_DIR / f"iteration_{final_checkpoint_step}.pt"
+    torch.save(
+        {
+            "iteration": NUM_ITERATIONS,
+            "model_state_dict": model.state_dict(),
+        },
+        final_checkpoint_path,
+    )
+
     self_play_pool.close()
     writer.close()
 
