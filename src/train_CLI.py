@@ -87,14 +87,14 @@ def previous_checkpoint_winrate(
 
 def train(
     delete_existing_checkpoints: bool = False,
-    num_iterations: int = 10_000,
+    num_iterations: int = 300,
     workers: int = 24,
 ):
     NUM_ITERATIONS = num_iterations
-    GAMES_PER_ITERATION = 32
-    TRAIN_STEPS_PER_ITERATION = 128
+    GAMES_PER_ITERATION = 512
+    TRAIN_STEPS_PER_ITERATION = 1024
     BATCH_SIZE = 128
-    REPLAY_BUFFER_SIZE = 100_000
+    REPLAY_BUFFER_SIZE = 500_000
 
     NUM_SIMULATIONS_TRAINING = 100
     C_PUCT = 1.5
@@ -102,13 +102,13 @@ def train(
     DIRICHLET_EPSILON = 0.25
     LEARNING_RATE = 2e-4
     FINAL_LEARNING_RATE = 0.0
-    CHECKPOINT_EVERY_ITERATIONS = 10
+    CHECKPOINT_EVERY_ITERATIONS = 1
     EVAL_CHECKPOINT_GAPS = (2, 5, 10)
     WEIGHT_DECAY = 1e-4
     MAX_GRAD_NORM = 1.0
+    DROPOUT = 0.2
     NUM_SAMPLING_MOVES = 8
-    N_PARALLEL_WORKERS = min(workers, GAMES_PER_ITERATION, os.cpu_count() or 1)
-    SELF_PLAY_WORKER_MAX_TASKS = 1000
+    EVALUATION_WORKERS = min(workers, os.cpu_count() or 1)
     TENSORBOARD_DIR = Path("tb_logs")
 
     CHECKPOINT_DIR = Path("checkpoints")
@@ -121,7 +121,7 @@ def train(
         shutil.rmtree(TENSORBOARD_DIR)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = PVModel().to(device)
+    model = PVModel(dropout=DROPOUT).to(device)
     trainable_parameters = sum(
         parameter.numel() for parameter in model.parameters() if parameter.requires_grad
     )
@@ -133,12 +133,10 @@ def train(
     replay_buffer = ReplayBuffer(capacity=REPLAY_BUFFER_SIZE)
     writer = SummaryWriter(TENSORBOARD_DIR)
     self_play_pool = ParallelSelfPlayPool(
-        max_workers=N_PARALLEL_WORKERS,
         num_simulations=NUM_SIMULATIONS_TRAINING,
         c_puct=C_PUCT,
         dirichlet_alpha=DIRICHLET_ALPHA,
         dirichlet_epsilon=DIRICHLET_EPSILON,
-        max_tasks_per_child=SELF_PLAY_WORKER_MAX_TASKS,
     )
     self_play_pool.open()
 
@@ -158,8 +156,10 @@ def train(
 
     print("- Device: " + ("Cuda 🥰" if device.type == "cuda" else "CPU 🥹"))
     print(f"- Trainable parameters: {trainable_parameters:,}")
-    print(f"- Workers: {N_PARALLEL_WORKERS:,}")
+    print(f"- Self-play games per iteration: {GAMES_PER_ITERATION:,}")
+    print(f"- Evaluation workers: {EVALUATION_WORKERS:,}")
     print(f"- Total iterations: {NUM_ITERATIONS:,}")
+    print(f"- Dropout: {DROPOUT:.2f}")
     print(
         "- LR schedule: "
         f"cosine decay from {format_learning_rate(LEARNING_RATE)} "
@@ -303,7 +303,7 @@ def train(
                     saved_checkpoint_paths[-evaluation_checkpoint_gap],
                     checkpoint_path,
                     num_simulations=NUM_SIMULATIONS_TRAINING,
-                    max_workers=N_PARALLEL_WORKERS,
+                    max_workers=EVALUATION_WORKERS,
                     c_puct=C_PUCT,
                 )
                 checkpoint_winrates[f"gap_{evaluation_checkpoint_gap}"] = float(
@@ -338,14 +338,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num-iterations",
         type=int,
-        default=10_000,
-        help="Number of training iterations to run. Default: 10,000.",
+        default=300,
+        help="Number of training iterations to run. Default: 300.",
     )
     parser.add_argument(
         "--workers",
         type=int,
         default=24,
-        help="Number of self-play worker processes to use. Default: 24.",
+        help="Number of worker processes to use for checkpoint evaluation. Default: 24.",
     )
     parser.add_argument(
         "--delete-existing-checkpoints",

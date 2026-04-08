@@ -1,183 +1,194 @@
 """
-Parallel self-play helpers used by the training loop. Parallelization aspects kinda vibe-coded.
+Single-process self-play helpers that batch model inference across many live games. Parallelization aspects kinda vibe-coded.
 """
-
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from multiprocessing import get_context
 
 import numpy as np
 import torch
 from tqdm import tqdm
 
 from .Env import Env
-from .MCTS import MCTS
+from .MCTS import MCTS, Node
 from .models import PVModel
 
-_WORKER_NUM_SIMULATIONS = None
-_WORKER_C_PUCT = None
-_WORKER_DIRICHLET_ALPHA = None
-_WORKER_DIRICHLET_EPSILON = None
+
+class _LiveSelfPlayGame:
+
+    def __init__(self, seed: int):
+        self.env = Env()
+        self.env.reset()
+        self.rng = np.random.default_rng(seed)
+        self.trajectory = []
+        self.move_index = 0
 
 
-def play_one_self_play_game(
-    env: Env,
-    mcts: MCTS,
-    num_sampling_moves: int = 8,
+def _add_exploration_noise(
+    root: Node,
+    dirichlet_alpha: float,
+    dirichlet_epsilon: float,
+    rng,
 ):
-    """
-    Play one self-play game and return training examples (state, policy, value).
-    """
-    trajectory = []
-    env.reset()
+    if len(root.children) == 0:
+        return
 
-    move_index = 0
-
-    while not env.is_terminal():
-        root = mcts.run(root_env=env)
-        temperature = 1.0 if move_index < num_sampling_moves else 0.0
-        pi = mcts.visit_counts_to_policy(root=root, temperature=temperature)
-
-        player = env.current_player()
-        x = env.canonical_state(perspective_player=player)
-
-        trajectory.append((x, pi, player))
-
-        action = np.random.choice(len(pi), p=pi)
-        env.step(action)
-        move_index += 1
-
-    examples = []
-    for x, pi, player in trajectory:
-        z = env.terminal_value(perspective_player=player)
-        examples.append((x, pi, z))
-
-    return examples
-
-# Everything below is about the parallelism, which is a vibe-coded optimization feature.
-
-def _split_games_across_workers(total_games: int, num_workers: int):
-    num_workers = max(1, min(total_games, num_workers))
-    base_games_per_worker, extra_games = divmod(total_games, num_workers)
-
-    return [
-        base_games_per_worker + (1 if worker_index < extra_games else 0)
-        for worker_index in range(num_workers)
-        if base_games_per_worker + (1 if worker_index < extra_games else 0) > 0
-    ]
+    noise = rng.dirichlet([dirichlet_alpha] * len(root.children))
+    for child, noise_value in zip(root.children.values(), noise):
+        child.prior = (
+            (1 - dirichlet_epsilon) * child.prior
+            + dirichlet_epsilon * float(noise_value)
+        )
 
 
-def _cpu_model_state_dict(model: PVModel):
-    return {
-        parameter_name: parameter.detach().cpu().numpy().copy()
-        for parameter_name, parameter in model.state_dict().items()
-    }
+def _softmax_legal_policy(logits, legal_actions_mask):
+    masked_logits = np.full_like(logits, -np.inf, dtype=np.float32)
+    masked_logits[legal_actions_mask] = logits[legal_actions_mask]
+    max_logit = np.max(masked_logits[legal_actions_mask])
+    exp_logits = np.zeros_like(logits, dtype=np.float32)
+    exp_logits[legal_actions_mask] = np.exp(masked_logits[legal_actions_mask] - max_logit)
+    return exp_logits / np.sum(exp_logits[legal_actions_mask])
 
 
-def _init_self_play_worker(
-    num_simulations: int,
-    c_puct: float,
+def _evaluate_pending_nodes(
+    model: PVModel,
+    pending_nodes,
+    mcts_helper: MCTS,
+):
+    if not pending_nodes:
+        return
+
+    device = next(model.parameters()).device
+    x_batch = np.stack(
+        [
+            pending_node["env"].canonical_state(
+                perspective_player=pending_node["node"].player_to_play
+            )
+            for pending_node in pending_nodes
+        ]
+    )
+    x_batch = torch.as_tensor(
+        x_batch,
+        dtype=torch.float32,
+        device=device,
+    )
+
+    with torch.inference_mode():
+        policy_logits_batch, value_batch = model(x_batch)
+
+    policy_logits_batch = policy_logits_batch.detach().cpu().numpy()
+    value_batch = value_batch.squeeze(-1).detach().cpu().numpy()
+
+    for pending_node, policy_logits, value in zip(
+        pending_nodes,
+        policy_logits_batch,
+        value_batch,
+    ):
+        node = pending_node["node"]
+        env = pending_node["env"]
+        legal_actions_mask = env.legal_actions_mask()
+        priors = _softmax_legal_policy(policy_logits, legal_actions_mask)
+
+        for action, prior in enumerate(priors):
+            if legal_actions_mask[action]:
+                node.children[action] = Node(
+                    prior=float(prior),
+                    player_to_play=-node.player_to_play,
+                )
+
+        node.is_expanded = True
+        mcts_helper._backpropagate(pending_node["path"], float(value))
+
+
+def _run_batched_mcts(
+    live_games,
+    model: PVModel,
+    mcts_helper: MCTS,
+    add_exploration_noise: bool,
     dirichlet_alpha: float,
     dirichlet_epsilon: float,
 ):
-    global _WORKER_NUM_SIMULATIONS
-    global _WORKER_C_PUCT
-    global _WORKER_DIRICHLET_ALPHA
-    global _WORKER_DIRICHLET_EPSILON
+    roots = [
+        Node(prior=1.0, player_to_play=live_game.env.current_player())
+        for live_game in live_games
+    ]
 
-    torch.set_num_threads(1)
-    try:
-        torch.set_num_interop_threads(1)
-    except RuntimeError:
-        pass
-
-    _WORKER_NUM_SIMULATIONS = num_simulations
-    _WORKER_C_PUCT = c_puct
-    _WORKER_DIRICHLET_ALPHA = dirichlet_alpha
-    _WORKER_DIRICHLET_EPSILON = dirichlet_epsilon
-
-
-def _play_self_play_games_worker(
-    model_state_dict,
-    num_games: int,
-    num_sampling_moves: int,
-    seed: int,
-):
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-
-    model = PVModel()
-    model.load_state_dict(
-        {
-            parameter_name: torch.from_numpy(parameter_value)
-            for parameter_name, parameter_value in model_state_dict.items()
-        }
-    )
-    model.eval()
-
-    mcts = MCTS(
+    _evaluate_pending_nodes(
         model=model,
-        num_simulations=_WORKER_NUM_SIMULATIONS,
-        c_puct=_WORKER_C_PUCT,
-        add_exploration_noise=True,
-        dirichlet_alpha=_WORKER_DIRICHLET_ALPHA,
-        dirichlet_epsilon=_WORKER_DIRICHLET_EPSILON,
+        pending_nodes=[
+            {
+                "node": root,
+                "env": live_game.env,
+                "path": [root],
+            }
+            for live_game, root in zip(live_games, roots)
+        ],
+        mcts_helper=mcts_helper,
     )
 
-    examples = []
-    for _ in range(num_games):
-        env = Env()
-        examples.extend(
-            play_one_self_play_game(
-                env=env,
-                mcts=mcts,
-                num_sampling_moves=num_sampling_moves,
+    if add_exploration_noise:
+        for live_game, root in zip(live_games, roots):
+            _add_exploration_noise(
+                root=root,
+                dirichlet_alpha=dirichlet_alpha,
+                dirichlet_epsilon=dirichlet_epsilon,
+                rng=live_game.rng,
             )
+
+    for _ in range(mcts_helper.num_simulations):
+        pending_nodes = []
+
+        for live_game, root in zip(live_games, roots):
+            env = live_game.env.clone()
+            node = root
+            path = [node]
+
+            while node.is_expanded and len(node.children) > 0:
+                action, child = mcts_helper._select_child(node)
+                env.step(action)
+                node = child
+                path.append(node)
+
+                if env.is_terminal():
+                    break
+
+            if env.is_terminal():
+                value = env.terminal_value(node.player_to_play)
+                mcts_helper._backpropagate(path, value)
+            else:
+                pending_nodes.append(
+                    {
+                        "node": node,
+                        "env": env,
+                        "path": path,
+                    }
+                )
+
+        _evaluate_pending_nodes(
+            model=model,
+            pending_nodes=pending_nodes,
+            mcts_helper=mcts_helper,
         )
 
-    return examples
+    return roots
 
 
 class ParallelSelfPlayPool:
 
     def __init__(
         self,
-        max_workers: int,
         num_simulations: int,
         c_puct: float,
         dirichlet_alpha: float,
         dirichlet_epsilon: float,
-        max_tasks_per_child: int = 100,
     ):
-        self.max_workers = max_workers
         self.num_simulations = num_simulations
         self.c_puct = c_puct
         self.dirichlet_alpha = dirichlet_alpha
         self.dirichlet_epsilon = dirichlet_epsilon
-        self.max_tasks_per_child = max_tasks_per_child
-        self.executor = None
 
     def open(self):
-        if self.executor is not None:
-            return self
-
-        self.executor = ProcessPoolExecutor(
-            max_workers=self.max_workers,
-            mp_context=get_context("spawn"),
-            initializer=_init_self_play_worker,
-            initargs=(
-                self.num_simulations,
-                self.c_puct,
-                self.dirichlet_alpha,
-                self.dirichlet_epsilon,
-            ),
-            max_tasks_per_child=self.max_tasks_per_child,
-        )
         return self
 
     def close(self):
-        if self.executor is not None:
-            self.executor.shutdown(wait=True)
-            self.executor = None
+        return None
 
     def __enter__(self):
         return self.open()
@@ -195,22 +206,19 @@ class ParallelSelfPlayPool:
         position: int = 1,
         leave: bool = False,
     ):
-        if self.executor is None:
-            raise RuntimeError("ParallelSelfPlayPool must be entered before use.")
+        if total_games <= 0:
+            return []
 
-        model_state_dict = _cpu_model_state_dict(model)
-        worker_game_counts = _split_games_across_workers(total_games, self.max_workers)
-
-        future_to_num_games = {}
-        for worker_index, num_games in enumerate(worker_game_counts):
-            future = self.executor.submit(
-                _play_self_play_games_worker,
-                model_state_dict,
-                num_games,
-                num_sampling_moves,
-                iteration * self.max_workers + worker_index,
-            )
-            future_to_num_games[future] = num_games
+        live_games = [
+            _LiveSelfPlayGame(seed=iteration * total_games + game_index)
+            for game_index in range(total_games)
+        ]
+        mcts_helper = MCTS(
+            model=model,
+            num_simulations=self.num_simulations,
+            c_puct=self.c_puct,
+            add_exploration_noise=False,
+        )
 
         examples = []
         with tqdm(
@@ -219,8 +227,42 @@ class ParallelSelfPlayPool:
             position=position,
             leave=leave,
         ) as self_play_bar:
-            for future in as_completed(future_to_num_games):
-                examples.extend(future.result())
-                self_play_bar.update(future_to_num_games[future])
+            while live_games:
+                roots = _run_batched_mcts(
+                    live_games=live_games,
+                    model=model,
+                    mcts_helper=mcts_helper,
+                    add_exploration_noise=True,
+                    dirichlet_alpha=self.dirichlet_alpha,
+                    dirichlet_epsilon=self.dirichlet_epsilon,
+                )
+
+                next_live_games = []
+                for live_game, root in zip(live_games, roots):
+                    temperature = (
+                        1.0 if live_game.move_index < num_sampling_moves else 0.0
+                    )
+                    pi = mcts_helper.visit_counts_to_policy(
+                        root=root,
+                        temperature=temperature,
+                    )
+
+                    player = live_game.env.current_player()
+                    x = live_game.env.canonical_state(perspective_player=player)
+                    live_game.trajectory.append((x, pi, player))
+
+                    action = int(live_game.rng.choice(len(pi), p=pi))
+                    live_game.env.step(action)
+                    live_game.move_index += 1
+
+                    if live_game.env.is_terminal():
+                        for x, pi, player in live_game.trajectory:
+                            z = live_game.env.terminal_value(perspective_player=player)
+                            examples.append((x, pi, z))
+                        self_play_bar.update(1)
+                    else:
+                        next_live_games.append(live_game)
+
+                live_games = next_live_games
 
         return examples

@@ -2,6 +2,38 @@ from collections import deque
 import random
 import numpy as np
 
+from .Game import BOARD_SIZE
+
+
+def apply_symmetry(x, pi):
+    x_augmented = np.asarray(x, dtype=np.float32)
+    pi_augmented = np.asarray(pi, dtype=np.float32).reshape(BOARD_SIZE, BOARD_SIZE)
+
+    if random.random() < 0.5:
+        x_augmented = np.flip(x_augmented, axis=1)
+        pi_augmented = np.flip(pi_augmented, axis=0)
+
+    rotation_count = random.randrange(4)
+    if rotation_count:
+        x_augmented = np.rot90(
+            x_augmented,
+            k=rotation_count,
+            axes=(1, 2),
+        )
+        pi_augmented = np.rot90(
+            pi_augmented,
+            k=rotation_count,
+            axes=(0, 1),
+        )
+
+    return (
+        np.ascontiguousarray(x_augmented, dtype=np.float32),
+        np.ascontiguousarray(
+            pi_augmented.reshape(BOARD_SIZE**2),
+            dtype=np.float32,
+        ),
+    )
+
 
 class ReplayBuffer:
 
@@ -24,8 +56,10 @@ class ReplayBuffer:
         ), "Not enough examples in the buffer to sample a batch."
         batch = random.sample(self.data, batch_size)
 
-        x_batch = np.stack([b[0] for b in batch])
-        pi_batch = np.stack([b[1] for b in batch])
+        augmented_batch = [apply_symmetry(b[0], b[1]) for b in batch]
+
+        x_batch = np.stack([b[0] for b in augmented_batch])
+        pi_batch = np.stack([b[1] for b in augmented_batch])
         z_batch = np.stack([b[2] for b in batch])
 
         return x_batch, pi_batch, z_batch

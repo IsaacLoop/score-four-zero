@@ -4,6 +4,7 @@ Entirely vibe-coded file (gpt-5.4 xhigh reasoning).
 
 import argparse
 import json
+import os
 import threading
 import time
 from datetime import datetime, timezone
@@ -13,6 +14,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 import numpy as np
+
+# Keep the checkpoint ranker CPU-only, including spawned fight workers.
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
 from .elo_history import build_elo_snapshot, checkpoint_iteration
 from .elo_parallel import (
@@ -35,7 +39,33 @@ TRACKER_STATE_SCHEMA_VERSION = 1
 DEFAULT_SNAPSHOT_MIN_INTERVAL_S = 0.5
 DEFAULT_LIVE_REFRESH_INTERVAL_S = 0.1
 DEFAULT_FIGHT_TASK_BATCH_SIZE = 8
-DEFAULT_ANCHOR_FIGHT_PROBABILITY = 0.01
+DEFAULT_ANCHOR_FIGHT_PROBABILITY = 0.5
+MIN_ANCHOR_FIGHT_PROBABILITY = 0.0
+MAX_ANCHOR_FIGHT_PROBABILITY = 1.0
+MIN_TEMPORAL_AVG_WINDOW = 5
+MAX_TEMPORAL_AVG_WINDOW = 10_000
+DEFAULT_TEMPORAL_AVG_WINDOW = 20
+
+
+def build_temporal_avg_window_options():
+    windows = {
+        MIN_TEMPORAL_AVG_WINDOW,
+        DEFAULT_TEMPORAL_AVG_WINDOW,
+        100,
+        MAX_TEMPORAL_AVG_WINDOW,
+    }
+
+    for window in np.geomspace(
+        MIN_TEMPORAL_AVG_WINDOW,
+        MAX_TEMPORAL_AVG_WINDOW,
+        num=101,
+    ):
+        windows.add(int(round(float(window))))
+
+    return tuple(sorted(windows))
+
+
+TEMPORAL_AVG_WINDOW_OPTIONS = build_temporal_avg_window_options()
 
 
 def load_legacy_anchors():
@@ -78,7 +108,7 @@ class LiveCheckpointRanker:
         resume_state_path: Path = DEFAULT_RESUME_STATE_PATH,
         persist_resume_state: bool = False,
         num_simulations: int = 25,
-        max_workers: int = 6,
+        max_workers: int = 16,
         c_puct: float = 1.5,
         elo_k: float = 10.0,
         matchup_distance_scale: float = 200.0,
@@ -117,12 +147,20 @@ class LiveCheckpointRanker:
         self.anchor_elos = [anchor["elo"] for anchor in self.anchors]
         self.anchor_fight_probability = DEFAULT_ANCHOR_FIGHT_PROBABILITY
         self.anchor_match_results_total = 0
+        self.temporal_avg_window = DEFAULT_TEMPORAL_AVG_WINDOW
 
         self.model_paths = []
         self.elos = []
         self.fight_counts = []
-        self.recent_avg_elo_last_100 = []
-        self.recent_avg_elo_warmup_counts = []
+        self.temporal_avg_windows = TEMPORAL_AVG_WINDOW_OPTIONS
+        self.temporal_avg_elos_by_window = {
+            window: [] for window in self.temporal_avg_windows
+        }
+        self.temporal_avg_warmup_counts_by_window = {
+            window: [] for window in self.temporal_avg_windows
+        }
+        self.recent_avg_elo_last_100 = self.temporal_avg_elos_by_window[100]
+        self.recent_avg_elo_warmup_counts = self.temporal_avg_warmup_counts_by_window[100]
         self._known_model_paths = set()
 
         self.total_matches = 0
@@ -174,6 +212,36 @@ class LiveCheckpointRanker:
             )
         return normalized_workers
 
+    @staticmethod
+    def _normalize_anchor_fight_probability(anchor_fight_probability: float) -> float:
+        normalized_probability = float(anchor_fight_probability)
+        if not (
+            MIN_ANCHOR_FIGHT_PROBABILITY
+            <= normalized_probability
+            <= MAX_ANCHOR_FIGHT_PROBABILITY
+        ):
+            raise ValueError(
+                "anchor_fight_probability must be between "
+                f"{MIN_ANCHOR_FIGHT_PROBABILITY:.0%} and {MAX_ANCHOR_FIGHT_PROBABILITY:.0%}"
+            )
+        return normalized_probability
+
+    @staticmethod
+    def _normalize_temporal_avg_window(temporal_avg_window: int) -> int:
+        requested_window = float(temporal_avg_window)
+        if not np.isfinite(requested_window):
+            raise ValueError(
+                "temporal_avg_window must be a finite number between "
+                f"{MIN_TEMPORAL_AVG_WINDOW} and {MAX_TEMPORAL_AVG_WINDOW}"
+            )
+
+        return int(
+            min(
+                TEMPORAL_AVG_WINDOW_OPTIONS,
+                key=lambda option: abs(option - requested_window),
+            )
+        )
+
     def stop(self):
         self._stop_event.set()
 
@@ -201,8 +269,16 @@ class LiveCheckpointRanker:
             self.model_paths = normalized_model_paths
             self.elos = [float(elo) for elo in state["elos"]]
             self.fight_counts = [int(count) for count in state["fight_counts"]]
-            self.recent_avg_elo_last_100 = [float(elo) for elo in self.elos]
-            self.recent_avg_elo_warmup_counts = [0 for _ in self.model_paths]
+            self.temporal_avg_elos_by_window = {
+                window: [float(elo) for elo in self.elos]
+                for window in self.temporal_avg_windows
+            }
+            self.temporal_avg_warmup_counts_by_window = {
+                window: [0 for _ in self.model_paths]
+                for window in self.temporal_avg_windows
+            }
+            self.recent_avg_elo_last_100 = self.temporal_avg_elos_by_window[100]
+            self.recent_avg_elo_warmup_counts = self.temporal_avg_warmup_counts_by_window[100]
             self._known_model_paths = set(self.model_paths)
             self.total_matches = int(state["total_matches"])
             self.cached_match_results_total = int(
@@ -323,6 +399,30 @@ class LiveCheckpointRanker:
             self._refresh_metadata_unlocked()
             return dict(self._summary_snapshot)
 
+    def set_anchor_fight_probability(self, anchor_fight_probability: float):
+        normalized_probability = self._normalize_anchor_fight_probability(
+            anchor_fight_probability
+        )
+
+        with self._lock:
+            if normalized_probability == self.anchor_fight_probability:
+                return dict(self._summary_snapshot)
+
+            self.anchor_fight_probability = normalized_probability
+            self._refresh_metadata_unlocked()
+            return dict(self._summary_snapshot)
+
+    def set_temporal_avg_window(self, temporal_avg_window: int):
+        normalized_window = self._normalize_temporal_avg_window(temporal_avg_window)
+
+        with self._lock:
+            if normalized_window == self.temporal_avg_window:
+                return dict(self._summary_snapshot)
+
+            self.temporal_avg_window = normalized_window
+            self._refresh_metadata_unlocked()
+            return dict(self._summary_snapshot)
+
     def run_forever(self):
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
@@ -432,6 +532,13 @@ class LiveCheckpointRanker:
                 "active_max_workers": int(self.active_max_workers),
                 "fight_counts": [int(count) for count in self.fight_counts],
                 "recent_avg_elo_last_100": list(self.recent_avg_elo_last_100),
+                "temporal_avg_window": int(self.temporal_avg_window),
+                "temporal_avg_window_options": [
+                    int(window) for window in self.temporal_avg_windows
+                ],
+                "temporal_avg_elos": list(
+                    self.temporal_avg_elos_by_window[self.temporal_avg_window]
+                ),
                 "fight_count_mean": fight_count_mean,
                 "fight_count_p01": fight_count_p01,
                 "fight_count_median": fight_count_median,
@@ -461,6 +568,7 @@ class LiveCheckpointRanker:
                 "elos",
                 "fight_counts",
                 "recent_avg_elo_last_100",
+                "temporal_avg_elos",
                 "anchor_names",
                 "anchor_iterations",
                 "anchor_elos",
@@ -524,8 +632,9 @@ class LiveCheckpointRanker:
                 self.model_paths.append(normalized_path)
                 self.elos.append(initial_elo)
                 self.fight_counts.append(0)
-                self.recent_avg_elo_last_100.append(float(initial_elo))
-                self.recent_avg_elo_warmup_counts.append(0)
+                for window in self.temporal_avg_windows:
+                    self.temporal_avg_elos_by_window[window].append(float(initial_elo))
+                    self.temporal_avg_warmup_counts_by_window[window].append(0)
                 self.last_update_at = datetime.now(timezone.utc).isoformat()
                 self._refresh_snapshots_unlocked()
                 should_persist = True
@@ -636,7 +745,12 @@ class LiveCheckpointRanker:
                     {
                         key: value
                         for key, value in self._chart_snapshot.items()
-                        if key != "recent_avg_elo_last_100"
+                        if key
+                        not in {
+                            "recent_avg_elo_last_100",
+                            "temporal_avg_elos",
+                            "temporal_avg_window_options",
+                        }
                     }
                 )
                 while self._next_snapshot_match_count <= self.total_matches:
@@ -649,21 +763,24 @@ class LiveCheckpointRanker:
 
     def _record_recent_elo_unlocked(self, model_index: int):
         current_elo = float(self.elos[model_index])
-        warmup_count = self.recent_avg_elo_warmup_counts[model_index]
+        for window in self.temporal_avg_windows:
+            warmup_counts = self.temporal_avg_warmup_counts_by_window[window]
+            temporal_avg_elos = self.temporal_avg_elos_by_window[window]
+            warmup_count = warmup_counts[model_index]
 
-        if warmup_count < 100:
-            next_count = warmup_count + 1
-            previous_average = self.recent_avg_elo_last_100[model_index]
-            self.recent_avg_elo_last_100[model_index] = (
-                previous_average * warmup_count + current_elo
-            ) / next_count
-            self.recent_avg_elo_warmup_counts[model_index] = next_count
-            return
+            if warmup_count < window:
+                next_count = warmup_count + 1
+                previous_average = temporal_avg_elos[model_index]
+                temporal_avg_elos[model_index] = (
+                    previous_average * warmup_count + current_elo
+                ) / next_count
+                warmup_counts[model_index] = next_count
+                continue
 
-        self.recent_avg_elo_last_100[model_index] = (
-            self.recent_avg_elo_last_100[model_index] * 0.99
-            + current_elo * 0.01
-        )
+            temporal_avg_elos[model_index] = (
+                temporal_avg_elos[model_index] * (1.0 - 1.0 / window)
+                + current_elo * (1.0 / window)
+            )
 
 
 def make_handler(ranker: LiveCheckpointRanker):
@@ -731,6 +848,54 @@ def make_handler(ranker: LiveCheckpointRanker):
                 self._send_json(snapshot)
                 return
 
+            if parsed_url.path == "/api/anchor-fight-probability":
+                try:
+                    payload = self._read_json()
+                    snapshot = ranker.set_anchor_fight_probability(
+                        payload["anchor_fight_probability"]
+                    )
+                except (KeyError, TypeError, json.JSONDecodeError):
+                    self._send_json(
+                        {
+                            "error": "Request body must be valid JSON with anchor_fight_probability."
+                        },
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+                except ValueError as exc:
+                    self._send_json(
+                        {"error": str(exc)},
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+
+                self._send_json(snapshot)
+                return
+
+            if parsed_url.path == "/api/temporal-average-window":
+                try:
+                    payload = self._read_json()
+                    snapshot = ranker.set_temporal_avg_window(
+                        payload["temporal_avg_window"]
+                    )
+                except (KeyError, TypeError, json.JSONDecodeError):
+                    self._send_json(
+                        {
+                            "error": "Request body must be valid JSON with temporal_avg_window."
+                        },
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+                except ValueError as exc:
+                    self._send_json(
+                        {"error": str(exc)},
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+
+                self._send_json(snapshot)
+                return
+
             self.send_error(HTTPStatus.NOT_FOUND, "Not found")
 
         def log_message(self, format, *args):
@@ -778,7 +943,7 @@ def main():
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--checkpoint-dir", type=Path, default=DEFAULT_CHECKPOINT_DIR)
-    parser.add_argument("--workers", type=int, default=6)
+    parser.add_argument("--workers", type=int, default=16)
     parser.add_argument("--num-simulations", type=int, default=25)
     parser.add_argument("--c-puct", type=float, default=1.5)
     parser.add_argument("--elo-k", type=float, default=10.0)

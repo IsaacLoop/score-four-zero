@@ -6,23 +6,30 @@ from .AbstractPVModel import AbstractPVModel
 
 class PVModel(AbstractPVModel):
 
-    def __init__(self):
+    def __init__(self, dropout: float = 0.2):
         super().__init__()
+        dropout_probability = dropout
 
         self.backbone = torch.nn.Sequential(
             torch.nn.Conv3d(in_channels=2, out_channels=32, kernel_size=3, padding=1),
+            # torch.nn.BatchNorm3d(32),
             torch.nn.ReLU(),
             torch.nn.Conv3d(in_channels=32, out_channels=64, kernel_size=3, padding=1),
+            # torch.nn.BatchNorm3d(64),
             torch.nn.ReLU(),
             torch.nn.Flatten(),
-            torch.nn.Linear(64 * BOARD_SIZE**3, 256),
+            torch.nn.Linear(64 * BOARD_SIZE**3, 128),
+            # torch.nn.BatchNorm1d(128),
             torch.nn.ReLU(),
+            # torch.nn.Dropout(p=dropout_probability),
         )
-        self.policy_head = torch.nn.Linear(256, BOARD_SIZE**2)
+        self.policy_head = torch.nn.Linear(128, BOARD_SIZE**2)
         self.value_head = torch.nn.Sequential(
-            torch.nn.Linear(256, 128),
+            torch.nn.Linear(128, 64),
+            # torch.nn.BatchNorm1d(64),
             torch.nn.ReLU(),
-            torch.nn.Linear(128, 1),
+            # torch.nn.Dropout(p=dropout_probability),
+            torch.nn.Linear(64, 1),
             torch.nn.Tanh(),
         )
 

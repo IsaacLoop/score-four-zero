@@ -704,6 +704,14 @@
             <div class="stat-table-label">Anchor fights</div>
             <div class="stat-table-value" id="anchor-total-value">-</div>
           </div>
+          <div class="stat-note" id="anchor-rate-note"></div>
+          <div class="control-stack">
+            <div class="slider-label">
+              <span>Target rate</span>
+              <span id="anchor-rate-slider-value">50%</span>
+            </div>
+            <input id="anchor-rate-slider" type="range" min="0" max="100" value="50" step="1">
+          </div>
         </div>
         <div class="panel stat">
           <div class="stat-label">Tracked Models</div>
@@ -728,14 +736,14 @@
         </div>
         <div class="panel stat">
           <div class="stat-label">Workers</div>
-          <div class="stat-value" id="worker-count-value">6</div>
+          <div class="stat-value" id="worker-count-value">16</div>
           <div class="stat-note" id="worker-count-note"></div>
           <div class="control-stack">
             <div class="slider-label">
               <span>Count</span>
-              <span id="worker-count-slider-value">6 workers</span>
+              <span id="worker-count-slider-value">16 workers</span>
             </div>
-            <input id="worker-count-slider" type="range" min="1" max="24" value="6" step="1">
+            <input id="worker-count-slider" type="range" min="1" max="24" value="16" step="1">
           </div>
         </div>
         <div class="panel stat" id="moving-average-card">
@@ -751,6 +759,21 @@
               <span id="moving-average-window-value">15 checkpoints</span>
             </div>
             <input id="moving-average-window" type="range" min="5" max="200" value="15" step="1">
+          </div>
+        </div>
+        <div class="panel stat" id="temporal-average-card">
+          <div class="stat-label">Temporal Average</div>
+          <div class="control-stack">
+            <label class="control-label">
+              <input id="show-temporal-average" type="checkbox">
+              Show temporal average
+            </label>
+            <div class="stat-note" id="temporal-average-note">Uses each checkpoint's smoothed average Elo over its past N fights in live view.</div>
+            <div class="slider-label">
+              <span>Window</span>
+              <span id="temporal-average-window-value">20 fights</span>
+            </div>
+            <input id="temporal-average-window" type="range" min="0" max="0" value="0" step="1">
           </div>
         </div>
         <div class="panel stat" id="minimal-mode-card">
@@ -842,6 +865,18 @@
     let workerCountUpdateError = "";
     let isWorkerSliderPointerDown = false;
     let suppressNextWorkerSliderChange = false;
+    let pendingAnchorFightProbability = null;
+    let isUpdatingAnchorFightProbability = false;
+    let anchorFightProbabilityUpdateError = "";
+    let isAnchorRateSliderPointerDown = false;
+    let suppressNextAnchorRateSliderChange = false;
+    let temporalAverageEnabled = false;
+    let pendingTemporalAverageWindow = null;
+    let isUpdatingTemporalAverageWindow = false;
+    let temporalAverageWindowUpdateError = "";
+    let isTemporalAverageSliderPointerDown = false;
+    let suppressNextTemporalAverageSliderChange = false;
+    let temporalAverageWindowOptions = [5, 20, 100, 10000];
     let preferredMovingAverageEnabled = false;
     let lastMinimalModeEnabled = null;
     const matchRateSamples = [];
@@ -862,12 +897,19 @@
     const movingAverageWindowSlider = document.getElementById("moving-average-window");
     const movingAverageWindowValue = document.getElementById("moving-average-window-value");
     const movingAverageNote = document.getElementById("moving-average-note");
+    const temporalAverageCheckbox = document.getElementById("show-temporal-average");
+    const temporalAverageWindowSlider = document.getElementById("temporal-average-window");
+    const temporalAverageWindowValue = document.getElementById("temporal-average-window-value");
+    const temporalAverageNote = document.getElementById("temporal-average-note");
     const minimalModeCheckbox = document.getElementById("minimal-mode-toggle");
     const nightModeToggle = document.getElementById("night-mode-toggle");
     const workerCountValue = document.getElementById("worker-count-value");
     const workerCountNote = document.getElementById("worker-count-note");
     const workerCountSlider = document.getElementById("worker-count-slider");
     const workerCountSliderValue = document.getElementById("worker-count-slider-value");
+    const anchorRateNote = document.getElementById("anchor-rate-note");
+    const anchorRateSlider = document.getElementById("anchor-rate-slider");
+    const anchorRateSliderValue = document.getElementById("anchor-rate-slider-value");
     const totalMatchesValue = document.getElementById("total-matches-value");
     const totalMatchesRate = document.getElementById("total-matches-rate");
     const trackedCheckpointCard = document.getElementById("tracked-checkpoint-card");
@@ -918,6 +960,7 @@
               ? preferredMovingAverageEnabled
               : movingAverageCheckbox.checked,
             movingAverageWindowSize,
+            temporalAverageEnabled,
             minimalModeEnabled: minimalModeCheckbox.checked,
             nightModeEnabled: nightModeToggle.checked,
             replaySnapshotsPerSecond,
@@ -932,6 +975,10 @@
       const storedSettings = loadUiSettings();
       if (typeof storedSettings.movingAverageEnabled === "boolean") {
         movingAverageCheckbox.checked = storedSettings.movingAverageEnabled;
+      }
+      if (typeof storedSettings.temporalAverageEnabled === "boolean") {
+        temporalAverageEnabled = storedSettings.temporalAverageEnabled;
+        temporalAverageCheckbox.checked = storedSettings.temporalAverageEnabled;
       }
       if (Number.isFinite(Number(storedSettings.movingAverageWindowSize))) {
         const clampedWindowSize = Math.min(
@@ -996,6 +1043,94 @@
 
     function syncWorkerCountLabel(value = Number(workerCountSlider.value)) {
       workerCountSliderValue.textContent = formatWorkerCountLabel(value);
+    }
+
+    function syncAnchorRateLabel(value = Number(anchorRateSlider.value)) {
+      anchorRateSliderValue.textContent = formatPercent(Number(value) / 100, 0);
+    }
+
+    function normalizeTemporalAverageWindowOptions(rawOptions) {
+      if (!Array.isArray(rawOptions)) {
+        return temporalAverageWindowOptions;
+      }
+
+      const normalizedOptions = Array.from(
+        new Set(
+          rawOptions
+            .map((windowSize) => Math.round(Number(windowSize)))
+            .filter(
+              (windowSize) =>
+                Number.isFinite(windowSize)
+                && windowSize >= 5
+                && windowSize <= 10000,
+            ),
+        ),
+      ).sort((leftWindowSize, rightWindowSize) => leftWindowSize - rightWindowSize);
+
+      return normalizedOptions.length
+        ? normalizedOptions
+        : temporalAverageWindowOptions;
+    }
+
+    function getTemporalAverageWindowOptions(snapshot = currentSummary) {
+      temporalAverageWindowOptions = normalizeTemporalAverageWindowOptions(
+        snapshot?.temporal_avg_window_options,
+      );
+      return temporalAverageWindowOptions;
+    }
+
+    function findTemporalAverageWindowOptionIndex(
+      value,
+      options = getTemporalAverageWindowOptions(),
+    ) {
+      if (!options.length) {
+        return 0;
+      }
+
+      const requestedValue = Number(value);
+      if (!Number.isFinite(requestedValue)) {
+        return 0;
+      }
+
+      let closestIndex = 0;
+      let closestDistance = Math.abs(options[0] - requestedValue);
+
+      for (let optionIndex = 1; optionIndex < options.length; optionIndex += 1) {
+        const optionDistance = Math.abs(options[optionIndex] - requestedValue);
+        if (optionDistance < closestDistance) {
+          closestIndex = optionIndex;
+          closestDistance = optionDistance;
+        }
+      }
+
+      return closestIndex;
+    }
+
+    function syncTemporalAverageWindowSliderOptions(snapshot = currentSummary) {
+      const options = getTemporalAverageWindowOptions(snapshot);
+      temporalAverageWindowSlider.min = "0";
+      temporalAverageWindowSlider.max = String(Math.max(0, options.length - 1));
+      temporalAverageWindowSlider.step = "1";
+      return options;
+    }
+
+    function getTemporalAverageWindowValueFromSlider(
+      options = getTemporalAverageWindowOptions(),
+    ) {
+      if (!options.length) {
+        return 20;
+      }
+
+      const sliderIndex = Math.round(Number(temporalAverageWindowSlider.value));
+      const clampedIndex = Math.min(
+        options.length - 1,
+        Math.max(0, Number.isFinite(sliderIndex) ? sliderIndex : 0),
+      );
+      return options[clampedIndex];
+    }
+
+    function syncTemporalAverageWindowLabel(value = getTemporalAverageWindowValueFromSlider()) {
+      temporalAverageWindowValue.textContent = `${formatInteger(value)} fights`;
     }
 
     function isReplayActive() {
@@ -1209,6 +1344,96 @@
       }
 
       workerCountNote.textContent = "";
+    }
+
+    function updateAnchorRateCard(snapshot = currentSummary) {
+      const liveConfigSnapshot = currentSummary ?? snapshot ?? null;
+      const requestedAnchorFightProbability = Number(
+        liveConfigSnapshot?.anchor_fight_probability ?? Number.NaN,
+      );
+      const displayedAnchorFightProbability = pendingAnchorFightProbability ?? (
+        Number.isFinite(requestedAnchorFightProbability) ? requestedAnchorFightProbability : null
+      );
+
+      if (pendingAnchorFightProbability !== null) {
+        anchorRateSlider.value = String(pendingAnchorFightProbability * 100);
+      } else if (Number.isFinite(requestedAnchorFightProbability)) {
+        anchorRateSlider.value = String(requestedAnchorFightProbability * 100);
+      }
+      syncAnchorRateLabel();
+      anchorRateSlider.disabled = isUpdatingAnchorFightProbability;
+
+      if (anchorFightProbabilityUpdateError) {
+        anchorRateNote.textContent = anchorFightProbabilityUpdateError;
+        return;
+      }
+
+      if (isUpdatingAnchorFightProbability) {
+        anchorRateNote.textContent = "Updating anchor fight rate...";
+        return;
+      }
+
+      anchorRateNote.textContent = "";
+    }
+
+    function updateTemporalAverageCard(snapshot = currentSummary) {
+      const liveConfigSnapshot = currentSummary ?? snapshot ?? null;
+      const displayedChartSnapshot = getDisplayedChartSnapshot();
+      const requestedTemporalAverageWindow = Number(
+        liveConfigSnapshot?.temporal_avg_window ?? Number.NaN,
+      );
+      const temporalAverageOptions = syncTemporalAverageWindowSliderOptions(
+        liveConfigSnapshot,
+      );
+
+      if (pendingTemporalAverageWindow !== null) {
+        temporalAverageWindowSlider.value = String(
+          findTemporalAverageWindowOptionIndex(
+            pendingTemporalAverageWindow,
+            temporalAverageOptions,
+          ),
+        );
+      } else if (Number.isFinite(requestedTemporalAverageWindow)) {
+        temporalAverageWindowSlider.value = String(
+          findTemporalAverageWindowOptionIndex(
+            requestedTemporalAverageWindow,
+            temporalAverageOptions,
+          ),
+        );
+      }
+
+      const displayedTemporalAverageWindow =
+        pendingTemporalAverageWindow !== null
+          ? pendingTemporalAverageWindow
+          : requestedTemporalAverageWindow;
+      syncTemporalAverageWindowLabel(
+        Number.isFinite(displayedTemporalAverageWindow)
+          ? displayedTemporalAverageWindow
+          : getTemporalAverageWindowValueFromSlider(temporalAverageOptions),
+      );
+      temporalAverageCheckbox.checked = temporalAverageEnabled;
+      temporalAverageWindowSlider.disabled = isUpdatingTemporalAverageWindow;
+
+      if (temporalAverageWindowUpdateError) {
+        temporalAverageNote.textContent = temporalAverageWindowUpdateError;
+        return;
+      }
+
+      if (isUpdatingTemporalAverageWindow) {
+        temporalAverageNote.textContent = "Updating temporal average window...";
+        return;
+      }
+
+      if (
+        temporalAverageEnabled
+        && displayedChartSnapshot !== currentChartSnapshot
+        && !displayedChartSnapshot?.temporal_avg_elos
+      ) {
+        temporalAverageNote.textContent = "Replay uses raw Elo. Temporal average is live-only.";
+        return;
+      }
+
+      temporalAverageNote.textContent = "Uses each checkpoint's smoothed average Elo over its past N fights in live view.";
     }
 
     function applyTheme(isDark) {
@@ -1723,9 +1948,19 @@
         liveUpdatedAt: currentSummary?.last_update_at ?? null,
         liveRequestedMaxWorkers: currentSummary?.requested_max_workers ?? null,
         liveActiveMaxWorkers: currentSummary?.active_max_workers ?? null,
+        liveAnchorFightProbability: currentSummary?.anchor_fight_probability ?? null,
+        liveTemporalAverageWindow: currentSummary?.temporal_avg_window ?? null,
+        liveTemporalAverageWindowOptionsLength:
+          currentSummary?.temporal_avg_window_options?.length ?? null,
+        liveTemporalAverageWindowOptionsMax:
+          currentSummary?.temporal_avg_window_options?.[
+            Math.max(0, (currentSummary?.temporal_avg_window_options?.length ?? 1) - 1)
+          ] ?? null,
         displayedNumModels: snapshot?.num_models ?? null,
         displayedRequestedMaxWorkers: snapshot?.requested_max_workers ?? null,
         displayedActiveMaxWorkers: snapshot?.active_max_workers ?? null,
+        displayedAnchorFightProbability: snapshot?.anchor_fight_probability ?? null,
+        displayedTemporalAverageWindow: snapshot?.temporal_avg_window ?? null,
         totalMatches: snapshot?.total_matches ?? null,
         historyLength: historySnapshots.length,
         selectedHistoryIndex,
@@ -1736,6 +1971,13 @@
         pendingWorkerCount,
         isUpdatingWorkerCount,
         workerCountUpdateError,
+        pendingAnchorFightProbability,
+        isUpdatingAnchorFightProbability,
+        anchorFightProbabilityUpdateError,
+        temporalAverageEnabled,
+        pendingTemporalAverageWindow,
+        isUpdatingTemporalAverageWindow,
+        temporalAverageWindowUpdateError,
         minimalModeEnabled: minimalModeCheckbox.checked,
       });
     }
@@ -1747,6 +1989,8 @@
         numModels: snapshot?.num_models ?? null,
         movingAverageEnabled: movingAverageCheckbox.checked && !minimalModeCheckbox.checked,
         movingAverageWindowSize,
+        temporalAverageEnabled,
+        temporalAverageWindow: snapshot?.temporal_avg_window ?? null,
         nightModeEnabled: nightModeToggle.checked,
         trackedCheckpointIteration,
         minimalModeEnabled: minimalModeCheckbox.checked,
@@ -2090,6 +2334,13 @@
     }
 
     function buildChartRenderModel(snapshot) {
+      const temporalAverageElos =
+        temporalAverageEnabled
+        && Array.isArray(snapshot?.temporal_avg_elos)
+        && snapshot.temporal_avg_elos.length === (snapshot?.model_iterations?.length ?? 0)
+          ? snapshot.temporal_avg_elos
+          : null;
+
       if (snapshot?.replayInterpolated && minimalModeCheckbox.checked) {
         const leftSnapshot = snapshot.leftSnapshot ?? null;
         const rightSnapshot = snapshot.rightSnapshot ?? null;
@@ -2206,7 +2457,7 @@
       }
 
       const iterations = snapshot?.model_iterations ?? [];
-      const elos = snapshot?.elos ?? [];
+      const elos = temporalAverageElos ?? snapshot?.elos ?? [];
       const fightCounts = snapshot?.fight_counts ?? [];
       const latestIteration = snapshot?.latest_model_iteration ?? null;
 
@@ -3655,6 +3906,8 @@
 
     function updateStats(snapshot) {
       updateWorkerCountCard(snapshot);
+      updateAnchorRateCard(snapshot);
+      updateTemporalAverageCard(snapshot);
       syncModeDependentCards();
 
       if (!snapshot) {
@@ -3703,7 +3956,7 @@
         ? "-"
         : formatNumber(recentMatchStats.uncachedRate);
       anchorCountValue.textContent = formatInteger(snapshot.num_anchors);
-      anchorTargetRateValue.textContent = formatPercent(snapshot.anchor_fight_probability);
+      anchorTargetRateValue.textContent = formatPercent(snapshot.anchor_fight_probability, 0);
       anchorActualRateValue.textContent =
         recentMatchStats?.anchorHitRate === undefined || recentMatchStats?.anchorHitRate === null
           ? "-"
@@ -4091,6 +4344,109 @@
       void submitWorkerCount(Number(workerCountSlider.value));
     }
 
+    async function submitAnchorFightProbability(nextAnchorFightProbabilityPercent) {
+      const normalizedPercent = Number(nextAnchorFightProbabilityPercent);
+      const normalizedProbability = normalizedPercent / 100;
+      const currentAnchorFightProbability = Number(
+        currentSummary?.anchor_fight_probability ?? Number.NaN,
+      );
+
+      if (!Number.isFinite(normalizedProbability)) {
+        return;
+      }
+
+      anchorFightProbabilityUpdateError = "";
+
+      if (normalizedProbability === currentAnchorFightProbability) {
+        pendingAnchorFightProbability = null;
+        updateAnchorRateCard();
+        return;
+      }
+
+      pendingAnchorFightProbability = normalizedProbability;
+      isUpdatingAnchorFightProbability = true;
+      updateAnchorRateCard();
+
+      try {
+        const payload = await fetchJson(
+          "/api/anchor-fight-probability",
+          "anchor fight probability update",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              anchor_fight_probability: normalizedProbability,
+            }),
+          },
+        );
+
+        currentSummary = payload;
+      } catch (error) {
+        anchorFightProbabilityUpdateError = `Anchor rate update failed: ${error.message}`;
+      } finally {
+        pendingAnchorFightProbability = null;
+        isUpdatingAnchorFightProbability = false;
+        renderDisplayedSnapshot({ animateChart: false, force: true });
+      }
+    }
+
+    function commitAnchorRateSliderValue() {
+      void submitAnchorFightProbability(Number(anchorRateSlider.value));
+    }
+
+    async function submitTemporalAverageWindow(nextTemporalAverageWindow) {
+      const normalizedTemporalAverageWindow = Number(nextTemporalAverageWindow);
+      const currentTemporalAverageWindow = Number(
+        currentSummary?.temporal_avg_window ?? Number.NaN,
+      );
+
+      if (!Number.isFinite(normalizedTemporalAverageWindow)) {
+        return;
+      }
+
+      temporalAverageWindowUpdateError = "";
+
+      if (normalizedTemporalAverageWindow === currentTemporalAverageWindow) {
+        pendingTemporalAverageWindow = null;
+        updateTemporalAverageCard();
+        return;
+      }
+
+      pendingTemporalAverageWindow = normalizedTemporalAverageWindow;
+      isUpdatingTemporalAverageWindow = true;
+      updateTemporalAverageCard();
+
+      try {
+        const payload = await fetchJson(
+          "/api/temporal-average-window",
+          "temporal average window update",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              temporal_avg_window: normalizedTemporalAverageWindow,
+            }),
+          },
+        );
+
+        currentSummary = payload;
+      } catch (error) {
+        temporalAverageWindowUpdateError = `Temporal average update failed: ${error.message}`;
+      } finally {
+        pendingTemporalAverageWindow = null;
+        isUpdatingTemporalAverageWindow = false;
+        renderDisplayedSnapshot({ animateChart: false, force: true });
+      }
+    }
+
+    function commitTemporalAverageWindowValue() {
+      void submitTemporalAverageWindow(getTemporalAverageWindowValueFromSlider());
+    }
+
     function renderDisplayedSnapshot({ animateChart = true, force = false } = {}) {
       const statsSnapshot = getDisplayedStatsSnapshot();
       const chartSnapshot = getDisplayedChartSnapshot();
@@ -4228,6 +4584,54 @@
       }
     });
 
+    anchorRateSlider.addEventListener("input", () => {
+      pendingAnchorFightProbability = Number(anchorRateSlider.value) / 100;
+      anchorFightProbabilityUpdateError = "";
+      updateAnchorRateCard();
+    });
+
+    anchorRateSlider.addEventListener("pointerdown", () => {
+      isAnchorRateSliderPointerDown = true;
+    });
+
+    anchorRateSlider.addEventListener("change", () => {
+      if (suppressNextAnchorRateSliderChange) {
+        suppressNextAnchorRateSliderChange = false;
+        return;
+      }
+
+      if (!isAnchorRateSliderPointerDown) {
+        commitAnchorRateSliderValue();
+      }
+    });
+
+    temporalAverageCheckbox.addEventListener("change", () => {
+      temporalAverageEnabled = temporalAverageCheckbox.checked;
+      saveUiSettings();
+      renderDisplayedSnapshot({ animateChart: false, force: true });
+    });
+
+    temporalAverageWindowSlider.addEventListener("input", () => {
+      pendingTemporalAverageWindow = getTemporalAverageWindowValueFromSlider();
+      temporalAverageWindowUpdateError = "";
+      updateTemporalAverageCard();
+    });
+
+    temporalAverageWindowSlider.addEventListener("pointerdown", () => {
+      isTemporalAverageSliderPointerDown = true;
+    });
+
+    temporalAverageWindowSlider.addEventListener("change", () => {
+      if (suppressNextTemporalAverageSliderChange) {
+        suppressNextTemporalAverageSliderChange = false;
+        return;
+      }
+
+      if (!isTemporalAverageSliderPointerDown) {
+        commitTemporalAverageWindowValue();
+      }
+    });
+
     movingAverageWindowSlider.addEventListener("input", () => {
       movingAverageWindowSize = Number(movingAverageWindowSlider.value);
       syncMovingAverageWindowLabel();
@@ -4256,18 +4660,32 @@
     });
 
     window.addEventListener("pointerup", () => {
-      if (!isWorkerSliderPointerDown) {
-        return;
+      if (isWorkerSliderPointerDown) {
+        isWorkerSliderPointerDown = false;
+        suppressNextWorkerSliderChange = true;
+        commitWorkerSliderValue();
       }
 
-      isWorkerSliderPointerDown = false;
-      suppressNextWorkerSliderChange = true;
-      commitWorkerSliderValue();
+      if (isAnchorRateSliderPointerDown) {
+        isAnchorRateSliderPointerDown = false;
+        suppressNextAnchorRateSliderChange = true;
+        commitAnchorRateSliderValue();
+      }
+
+      if (isTemporalAverageSliderPointerDown) {
+        isTemporalAverageSliderPointerDown = false;
+        suppressNextTemporalAverageSliderChange = true;
+        commitTemporalAverageWindowValue();
+      }
     });
 
     window.addEventListener("pointercancel", () => {
       isWorkerSliderPointerDown = false;
       suppressNextWorkerSliderChange = false;
+      isAnchorRateSliderPointerDown = false;
+      suppressNextAnchorRateSliderChange = false;
+      isTemporalAverageSliderPointerDown = false;
+      suppressNextTemporalAverageSliderChange = false;
     });
 
     document.addEventListener("mouseleave", () => {
@@ -4284,6 +4702,12 @@
     syncMovingAverageWindowLabel();
     syncModeDependentCards();
     syncWorkerCountLabel();
+    syncAnchorRateLabel();
+    syncTemporalAverageWindowSliderOptions();
+    temporalAverageWindowSlider.value = String(
+      findTemporalAverageWindowOptionIndex(20, temporalAverageWindowOptions),
+    );
+    syncTemporalAverageWindowLabel();
     loop();
   </script>
 </body>
