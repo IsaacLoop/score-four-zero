@@ -6,6 +6,8 @@ Z: Vertical
 
 from enum import IntEnum
 
+import numpy as np
+
 BOARD_SIZE = 4
 TOTAL_CELLS = BOARD_SIZE * BOARD_SIZE * BOARD_SIZE
 EMPTY_CELL = 0
@@ -20,71 +22,51 @@ class GameState(IntEnum):
     DRAW = 0
 
 
-def _build_masks():
-    """Build every winning mask for the 4x4x4 board."""
-    masks = []
-
-    def add_mask(cells):
-        """Add one winning mask from its occupied cells."""
-        mask = [
-            [[0 for _ in range(BOARD_SIZE)] for _ in range(BOARD_SIZE)]
-            for _ in range(BOARD_SIZE)
-        ]
-        for x, y, z in cells:
-            mask[x][y][z] = 1
-        masks.append(
-            tuple(
-                tuple(
-                    tuple(mask[x][y][z] for z in range(BOARD_SIZE))
-                    for y in range(BOARD_SIZE)
-                )
-                for x in range(BOARD_SIZE)
-            )
-        )
+def _build_winning_lines_by_cell():
+    all_lines = []
 
     # horizontal lines
     for y in range(BOARD_SIZE):
         for z in range(BOARD_SIZE):
-            add_mask([(x, y, z) for x in range(BOARD_SIZE)])
+            all_lines.append(tuple((x, y, z) for x in range(BOARD_SIZE)))
 
     # horizontal lines perpendicular
     for x in range(BOARD_SIZE):
         for z in range(BOARD_SIZE):
-            add_mask([(x, y, z) for y in range(BOARD_SIZE)])
+            all_lines.append(tuple((x, y, z) for y in range(BOARD_SIZE)))
 
     # vertical lines
     for x in range(BOARD_SIZE):
         for y in range(BOARD_SIZE):
-            add_mask([(x, y, z) for z in range(BOARD_SIZE)])
+            all_lines.append(tuple((x, y, z) for z in range(BOARD_SIZE)))
 
     # horizontal center diagonals
     for z in range(BOARD_SIZE):
-        add_mask([(i, i, z) for i in range(BOARD_SIZE)])
-        add_mask([(i, BOARD_SIZE - 1 - i, z) for i in range(BOARD_SIZE)])
+        all_lines.append(tuple((i, i, z) for i in range(BOARD_SIZE)))
+        all_lines.append(tuple((i, BOARD_SIZE - 1 - i, z) for i in range(BOARD_SIZE)))
 
     # vertical center diagonals
     for y in range(BOARD_SIZE):
-        add_mask([(i, y, i) for i in range(BOARD_SIZE)])
-        add_mask([(i, y, BOARD_SIZE - 1 - i) for i in range(BOARD_SIZE)])
+        all_lines.append(tuple((i, y, i) for i in range(BOARD_SIZE)))
+        all_lines.append(
+            tuple((i, y, BOARD_SIZE - 1 - i) for i in range(BOARD_SIZE))
+        )
 
     # vertical center diagonals perpendicular
     for x in range(BOARD_SIZE):
-        add_mask([(x, i, i) for i in range(BOARD_SIZE)])
-        add_mask([(x, i, BOARD_SIZE - 1 - i) for i in range(BOARD_SIZE)])
+        all_lines.append(tuple((x, i, i) for i in range(BOARD_SIZE)))
+        all_lines.append(
+            tuple((x, i, BOARD_SIZE - 1 - i) for i in range(BOARD_SIZE))
+        )
 
     # diagonal diagonals
-    add_mask([(i, i, i) for i in range(BOARD_SIZE)])
-    add_mask([(i, i, BOARD_SIZE - 1 - i) for i in range(BOARD_SIZE)])
-    add_mask([(i, BOARD_SIZE - 1 - i, i) for i in range(BOARD_SIZE)])
-    add_mask([(i, BOARD_SIZE - 1 - i, BOARD_SIZE - 1 - i) for i in range(BOARD_SIZE)])
+    all_lines.append(tuple((i, i, i) for i in range(BOARD_SIZE)))
+    all_lines.append(tuple((i, i, BOARD_SIZE - 1 - i) for i in range(BOARD_SIZE)))
+    all_lines.append(tuple((i, BOARD_SIZE - 1 - i, i) for i in range(BOARD_SIZE)))
+    all_lines.append(
+        tuple((i, BOARD_SIZE - 1 - i, BOARD_SIZE - 1 - i) for i in range(BOARD_SIZE))
+    )
 
-    return tuple(masks)
-
-
-MASKS = _build_masks()
-
-
-def _build_winning_lines_by_cell():
     lines_by_cell = {
         (x, y, z): []
         for x in range(BOARD_SIZE)
@@ -92,14 +74,7 @@ def _build_winning_lines_by_cell():
         for z in range(BOARD_SIZE)
     }
 
-    for mask in MASKS:
-        line = tuple(
-            (x, y, z)
-            for x in range(BOARD_SIZE)
-            for y in range(BOARD_SIZE)
-            for z in range(BOARD_SIZE)
-            if mask[x][y][z] == 1
-        )
+    for line in all_lines:
         for cell in line:
             lines_by_cell[cell].append(line)
 
@@ -116,17 +91,12 @@ class Game:
     """
 
     def __init__(self):
-        # dimensions are: horizontal, other horizontal, vertical
-        self.board = [
-            [[EMPTY_CELL for _ in range(BOARD_SIZE)] for _ in range(BOARD_SIZE)]
-            for _ in range(BOARD_SIZE)
-        ]
-        self.column_heights = [
-            [0 for _ in range(BOARD_SIZE)] for _ in range(BOARD_SIZE)
-        ]
+        self.board = np.zeros((BOARD_SIZE, BOARD_SIZE, BOARD_SIZE), dtype=np.int8)
+        self.column_heights = np.zeros((BOARD_SIZE, BOARD_SIZE), dtype=np.int8)
         self.current_player = PLAYER_1
         self.game_state = GameState.IN_PROGRESS
         self.move_count = 0
+        self._move_history = []
 
     def make_move(self, x: int, y: int) -> bool:
         """
@@ -139,20 +109,44 @@ class Game:
         if self.game_state != GameState.IN_PROGRESS:
             return False
 
-        z = self.column_heights[x][y]
+        z = int(self.column_heights[x, y])
         if z >= BOARD_SIZE:
             return False
 
-        player = self.current_player
-        self.board[x][y][z] = player
-        self.column_heights[x][y] += 1
+        player = int(self.current_player)
+        previous_game_state = self.game_state
+        self.board[x, y, z] = player
+        self.column_heights[x, y] = z + 1
         self.move_count += 1
+        self._move_history.append((x, y, z, player, previous_game_state))
         self.update_state(x, y, z, player)
 
         if self.game_state == GameState.IN_PROGRESS:
             self.current_player = PLAYER_2 if player == PLAYER_1 else PLAYER_1
 
         return True
+
+    def make_action(self, action: int) -> bool:
+        return self.make_move(action // BOARD_SIZE, action % BOARD_SIZE)
+
+    def undo_move(self, x: int, y: int) -> bool:
+        if not self._move_history:
+            return False
+
+        last_x, last_y, z, player, previous_game_state = self._move_history[-1]
+        if last_x != x or last_y != y:
+            return False
+
+        self._move_history.pop()
+        self.board[x, y, z] = EMPTY_CELL
+        self.column_heights[x, y] = z
+        self.move_count -= 1
+        self.current_player = player
+        self.game_state = previous_game_state
+        return True
+
+    def undo_action(self, action: int) -> bool:
+        return self.undo_move(action // BOARD_SIZE, action % BOARD_SIZE)
 
     def update_state(
         self, x: int, y: int, z: int, player: int | None = None
@@ -161,10 +155,10 @@ class Game:
         Update the game state after a move and return it.
         """
         if player is None:
-            player = self.board[x][y][z]
+            player = int(self.board[x, y, z])
 
         for line in WINNING_LINES_BY_CELL[(x, y, z)]:
-            if all(self.board[cx][cy][cz] == player for cx, cy, cz in line):
+            if all(self.board[cx, cy, cz] == player for cx, cy, cz in line):
                 self.game_state = (
                     GameState.PLAYER_1_WINS
                     if player == PLAYER_1

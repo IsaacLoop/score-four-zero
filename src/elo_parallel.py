@@ -15,13 +15,14 @@ from .MCTS import MCTS
 from .models import LegacyPVModel, PVModel
 
 _WORKER_MODEL_CACHE = {}
+_WORKER_EVAL_CACHE = {}
 _WORKER_NUM_SIMULATIONS = None
 _WORKER_C_PUCT = None
 _LEGACY_ANCHOR_DIR = (Path(__file__).resolve().parent.parent / "anchors" / "legacy_pv_model").resolve()
 
 
 def _init_fight_worker(num_simulations: int, c_puct: float):
-    global _WORKER_MODEL_CACHE, _WORKER_NUM_SIMULATIONS, _WORKER_C_PUCT
+    global _WORKER_MODEL_CACHE, _WORKER_EVAL_CACHE, _WORKER_NUM_SIMULATIONS, _WORKER_C_PUCT
 
     torch.set_num_threads(1)
     try:
@@ -30,6 +31,7 @@ def _init_fight_worker(num_simulations: int, c_puct: float):
         pass
 
     _WORKER_MODEL_CACHE = {}
+    _WORKER_EVAL_CACHE = {}
     _WORKER_NUM_SIMULATIONS = num_simulations
     _WORKER_C_PUCT = c_puct
 
@@ -59,25 +61,39 @@ def _fight_worker(model_path_1: str, model_path_2: str):
         num_simulations=_WORKER_NUM_SIMULATIONS,
         c_puct=_WORKER_C_PUCT,
         add_exploration_noise=False,
+        eval_cache=_WORKER_EVAL_CACHE,
+        model_cache_key=model_path_1,
     )
     mcts2 = MCTS(
         model2,
         num_simulations=_WORKER_NUM_SIMULATIONS,
         c_puct=_WORKER_C_PUCT,
         add_exploration_noise=False,
+        eval_cache=_WORKER_EVAL_CACHE,
+        model_cache_key=model_path_2,
     )
+    root1 = None
+    root2 = None
 
     while not env.is_terminal():
         if env.current_player() == -1:
-            root = mcts1.run(root_env=env)
-            pi = mcts1.visit_counts_to_policy(root=root, temperature=0.0)
+            root1 = mcts1.run(root_env=env, root=root1)
+            pi = mcts1.visit_counts_to_policy(root=root1, temperature=0.0)
             action = int(pi.argmax())
-            env.step(action)
         else:
-            root = mcts2.run(root_env=env)
-            pi = mcts2.visit_counts_to_policy(root=root, temperature=0.0)
+            root2 = mcts2.run(root_env=env, root=root2)
+            pi = mcts2.visit_counts_to_policy(root=root2, temperature=0.0)
             action = int(pi.argmax())
-            env.step(action)
+
+        env.step(action)
+        if root1 is not None:
+            root1 = root1.children.get(action)
+            if root1 is not None:
+                root1.prior = 1.0
+        if root2 is not None:
+            root2 = root2.children.get(action)
+            if root2 is not None:
+                root2.prior = 1.0
 
     return env.winner()
 
@@ -158,7 +174,7 @@ class ParallelFightPool:
         num_simulations: int,
         max_workers: int = 24,
         c_puct: float = 1.5,
-        max_tasks_per_child: int = 100,
+        max_tasks_per_child: int | None = None,
         task_batch_size: int = 1,
     ):
         self.model_paths = tuple(str(path) for path in model_paths)
@@ -168,6 +184,7 @@ class ParallelFightPool:
         self.max_tasks_per_child = max_tasks_per_child
         self.task_batch_size = max(1, int(task_batch_size))
         self.executor = None
+        self.pending_futures = {}
         self.result_cache = {}
 
     def open(self):
@@ -181,18 +198,56 @@ class ParallelFightPool:
             initargs=(self.num_simulations, self.c_puct),
             max_tasks_per_child=self.max_tasks_per_child,
         )
+        self.pending_futures = {}
         return self
 
     def close(self):
         if self.executor is not None:
             self.executor.shutdown(wait=True)
             self.executor = None
+        self.pending_futures = {}
 
     def __enter__(self):
         return self.open()
 
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
+
+    def available_worker_slots(self):
+        if self.executor is None:
+            raise RuntimeError("ParallelFightPool must be opened before use.")
+        return max(0, self.max_workers - len(self.pending_futures))
+
+    def has_pending_fights(self):
+        return bool(self.pending_futures)
+
+    def submit_path_matchup(self, path_matchup):
+        if self.executor is None:
+            raise RuntimeError("ParallelFightPool must be opened before use.")
+
+        future = self.executor.submit(_fight_worker, *path_matchup)
+        self.pending_futures[future] = path_matchup
+
+    def collect_completed_path_results(self, timeout: float | None = None):
+        if self.executor is None:
+            raise RuntimeError("ParallelFightPool must be opened before use.")
+        if not self.pending_futures:
+            return []
+
+        done_futures, _ = wait(
+            tuple(self.pending_futures),
+            timeout=timeout,
+            return_when=FIRST_COMPLETED,
+        )
+
+        completed_path_results = []
+        for future in done_futures:
+            path_matchup = self.pending_futures.pop(future)
+            result = future.result()
+            self.result_cache[path_matchup] = result
+            completed_path_results.append((path_matchup, result))
+
+        return completed_path_results
 
     def fight_results(
         self,
@@ -332,7 +387,7 @@ class ParallelEloPool:
         elo_k: float = 20.0,
         matchmaking_distance_scale: float = 200.0,
         matchmaking_min_weight: float = 0.05,
-        max_tasks_per_child: int = 100,
+        max_tasks_per_child: int | None = None,
     ):
         self.max_workers = max_workers
         self.elo_k = elo_k

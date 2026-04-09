@@ -38,7 +38,6 @@ MAX_WORKERS = 24
 TRACKER_STATE_SCHEMA_VERSION = 1
 DEFAULT_SNAPSHOT_MIN_INTERVAL_S = 0.5
 DEFAULT_LIVE_REFRESH_INTERVAL_S = 0.1
-DEFAULT_FIGHT_TASK_BATCH_SIZE = 8
 DEFAULT_ANCHOR_FIGHT_PROBABILITY = 0.5
 MIN_ANCHOR_FIGHT_PROBABILITY = 0.0
 MAX_ANCHOR_FIGHT_PROBABILITY = 1.0
@@ -118,7 +117,7 @@ class LiveCheckpointRanker:
         live_refresh_interval_s: float = DEFAULT_LIVE_REFRESH_INTERVAL_S,
         checkpoint_stable_age_s: float = 2.0,
         idle_sleep_s: float = 1.0,
-        max_tasks_per_child: int = 100,
+        max_tasks_per_child: int | None = None,
     ):
         self.checkpoint_dir = checkpoint_dir
         self.resume_state_path = resume_state_path
@@ -173,7 +172,6 @@ class LiveCheckpointRanker:
         self._next_snapshot_time = time.perf_counter()
         self._next_live_refresh_time = self._next_snapshot_time
         self._chart_version = 0
-        self.fight_task_batch_size = DEFAULT_FIGHT_TASK_BATCH_SIZE
         self._chart_snapshot = self._build_chart_snapshot_unlocked()
         self._summary_snapshot = self._build_summary_snapshot_unlocked(
             self._chart_snapshot
@@ -427,6 +425,9 @@ class LiveCheckpointRanker:
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
         fight_pool = None
+        active_samples_by_path_matchup = {}
+        queued_sample = None
+        queued_path_matchup = None
 
         try:
             while not self._stop_event.is_set():
@@ -443,32 +444,90 @@ class LiveCheckpointRanker:
                         max_workers=desired_workers,
                         c_puct=self.c_puct,
                         max_tasks_per_child=self.max_tasks_per_child,
-                        task_batch_size=self.fight_task_batch_size,
                     )
                     fight_pool.open()
                     self._set_active_max_workers(desired_workers)
-
-                batch = self._sample_batch(
-                    batch_size=desired_workers * self.fight_task_batch_size
-                )
-                if not batch:
-                    time.sleep(self.idle_sleep_s)
-                    continue
-
-                path_matchups = [
-                    self._path_matchup_from_sample(sample)
-                    for sample in batch
-                ]
+                    active_samples_by_path_matchup = {}
+                    queued_sample = None
+                    queued_path_matchup = None
 
                 try:
-                    batch_results = []
-                    for matchup_index, result, from_cache in fight_pool.iter_fight_path_results(
-                        path_matchups,
-                        desc=None,
-                        include_cache_status=True,
+                    completed_path_results = fight_pool.collect_completed_path_results(
+                        timeout=0.0
+                    )
+                    if completed_path_results:
+                        completed_updates = []
+                        for path_matchup, result in completed_path_results:
+                            sample = active_samples_by_path_matchup.pop(path_matchup)
+                            completed_updates.append((sample, result, False))
+                        self._apply_batch_results(completed_updates)
+
+                    if (
+                        queued_sample is not None
+                        and fight_pool.available_worker_slots() > 0
                     ):
-                        batch_results.append((batch[matchup_index], result, from_cache))
-                    self._apply_batch_results(batch_results)
+                        fight_pool.submit_path_matchup(queued_path_matchup)
+                        active_samples_by_path_matchup[queued_path_matchup] = queued_sample
+                        queued_sample = None
+                        queued_path_matchup = None
+
+                    sampled_cached_updates = []
+                    sampling_attempts = 0
+                    max_sampling_attempts = max(desired_workers * 8, 32)
+                    made_progress = bool(completed_path_results)
+
+                    while sampling_attempts < max_sampling_attempts:
+                        sample = self._sample_one()
+                        if sample is None:
+                            break
+
+                        path_matchup = self._path_matchup_from_sample(sample)
+                        cached_result = fight_pool.result_cache.get(path_matchup)
+                        if cached_result is not None:
+                            sampled_cached_updates.append((sample, cached_result, True))
+                            made_progress = True
+                            sampling_attempts += 1
+                            continue
+
+                        if (
+                            path_matchup in active_samples_by_path_matchup
+                            or path_matchup == queued_path_matchup
+                        ):
+                            sampling_attempts += 1
+                            continue
+
+                        if fight_pool.available_worker_slots() > 0:
+                            fight_pool.submit_path_matchup(path_matchup)
+                            active_samples_by_path_matchup[path_matchup] = sample
+                            made_progress = True
+                            sampling_attempts += 1
+                            continue
+
+                        if queued_sample is None:
+                            queued_sample = sample
+                            queued_path_matchup = path_matchup
+                            made_progress = True
+                        break
+
+                    if sampled_cached_updates:
+                        self._apply_batch_results(sampled_cached_updates)
+
+                    if made_progress:
+                        continue
+
+                    completed_path_results = fight_pool.collect_completed_path_results(
+                        timeout=self.live_refresh_interval_s
+                    )
+                    if completed_path_results:
+                        completed_updates = []
+                        for path_matchup, result in completed_path_results:
+                            sample = active_samples_by_path_matchup.pop(path_matchup)
+                            completed_updates.append((sample, result, False))
+                        self._apply_batch_results(completed_updates)
+                        continue
+
+                    if not fight_pool.has_pending_fights():
+                        time.sleep(self.idle_sleep_s)
                 except Exception as exc:
                     print(f"Match batch failed: {exc}")
                     time.sleep(self.idle_sleep_s)
@@ -646,29 +705,26 @@ class LiveCheckpointRanker:
 
         return new_models
 
-    def _sample_batch(self, batch_size: int):
+    def _sample_one(self):
         with self._lock:
             if len(self.model_paths) < 2:
-                return []
+                return None
+            return self._sample_one_unlocked()
 
-            batch = []
-            for _ in range(batch_size):
-                idx1 = int(np.random.randint(len(self.model_paths)))
-                swapped = bool(np.random.rand() < 0.5)
-                if self.anchor_paths and np.random.rand() < self.anchor_fight_probability:
-                    anchor_idx = self._closest_anchor_index_unlocked(idx1)
-                    batch.append(("anchor", idx1, anchor_idx, swapped))
-                    continue
+    def _sample_one_unlocked(self):
+        idx1 = int(np.random.randint(len(self.model_paths)))
+        swapped = bool(np.random.rand() < 0.5)
+        if self.anchor_paths and np.random.rand() < self.anchor_fight_probability:
+            anchor_idx = self._closest_anchor_index_unlocked(idx1)
+            return ("anchor", idx1, anchor_idx, swapped)
 
-                _, idx2 = sample_matchup(
-                    self.elos,
-                    distance_scale=self.matchup_distance_scale,
-                    min_weight=self.matchup_min_weight,
-                    forced_idx1=idx1,
-                )
-                batch.append(("model", idx1, idx2, swapped))
-
-            return batch
+        _, idx2 = sample_matchup(
+            self.elos,
+            distance_scale=self.matchup_distance_scale,
+            min_weight=self.matchup_min_weight,
+            forced_idx1=idx1,
+        )
+        return ("model", idx1, idx2, swapped)
 
     def _closest_anchor_index_unlocked(self, model_index: int):
         current_elo = float(self.elos[model_index])
@@ -679,17 +735,20 @@ class LiveCheckpointRanker:
         return int(closest_anchor_index)
 
     def _path_matchup_from_sample(self, sample):
+        with self._lock:
+            return self._path_matchup_from_sample_unlocked(sample)
+
+    def _path_matchup_from_sample_unlocked(self, sample):
         sample_kind, idx1, idx2, swapped = sample
 
-        with self._lock:
-            if sample_kind == "anchor":
-                if swapped:
-                    return self.anchor_paths[idx2], self.model_paths[idx1]
-                return self.model_paths[idx1], self.anchor_paths[idx2]
-
+        if sample_kind == "anchor":
             if swapped:
-                return self.model_paths[idx2], self.model_paths[idx1]
-            return self.model_paths[idx1], self.model_paths[idx2]
+                return self.anchor_paths[idx2], self.model_paths[idx1]
+            return self.model_paths[idx1], self.anchor_paths[idx2]
+
+        if swapped:
+            return self.model_paths[idx2], self.model_paths[idx1]
+        return self.model_paths[idx1], self.model_paths[idx2]
 
     def _apply_batch_results(self, batch_results):
         if not batch_results:
