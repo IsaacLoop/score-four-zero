@@ -21,8 +21,18 @@ def learning_rate_at_step(
     total_steps: int,
     peak_lr: float,
     final_lr: float,
+    warmup_fraction: float = 0.0,
 ):
-    progress = step / (total_steps - 1)
+    if total_steps <= 1:
+        return peak_lr
+
+    warmup_steps = max(0, min(total_steps - 1, int(total_steps * warmup_fraction)))
+    if warmup_steps > 0 and step < warmup_steps:
+        return peak_lr * ((step + 1) / warmup_steps)
+
+    cosine_total_steps = max(1, total_steps - warmup_steps)
+    cosine_step = min(cosine_total_steps - 1, max(0, step - warmup_steps))
+    progress = cosine_step / max(1, cosine_total_steps - 1)
     cosine_factor = 0.5 * (1.0 + math.cos(math.pi * progress))
     return final_lr + (peak_lr - final_lr) * cosine_factor
 
@@ -88,7 +98,8 @@ def previous_checkpoint_winrate(
 def train(
     delete_existing_checkpoints: bool = False,
     num_iterations: int = 300,
-    workers: int = 24,
+    workers: int = 8,
+    skip_evaluation: bool = False,
 ):
     NUM_ITERATIONS = num_iterations
     GAMES_PER_ITERATION = 512
@@ -102,12 +113,17 @@ def train(
     DIRICHLET_EPSILON = 0.25
     LEARNING_RATE = 2e-4
     FINAL_LEARNING_RATE = 0.0
+    WARMUP_FRACTION = 0.02
+    DROPOUT = 0.1
     CHECKPOINT_EVERY_ITERATIONS = 1
     EVAL_CHECKPOINT_GAPS = (2, 5, 10)
     WEIGHT_DECAY = 1e-4
     MAX_GRAD_NORM = 1.0
-    DROPOUT = 0.2
     NUM_SAMPLING_MOVES = 8
+    SELF_PLAY_WORKERS = workers
+    LIVE_GAMES_PER_WORKER = 64
+    EVALUATOR_MAX_BATCH_SIZE = 1024
+    EVALUATOR_MAX_WAIT_S = 0.001
     EVALUATION_WORKERS = min(workers, os.cpu_count() or 1)
     TENSORBOARD_DIR = Path("tb_logs")
 
@@ -137,6 +153,10 @@ def train(
         c_puct=C_PUCT,
         dirichlet_alpha=DIRICHLET_ALPHA,
         dirichlet_epsilon=DIRICHLET_EPSILON,
+        max_workers=SELF_PLAY_WORKERS,
+        live_games_per_worker=LIVE_GAMES_PER_WORKER,
+        evaluator_max_batch_size=EVALUATOR_MAX_BATCH_SIZE,
+        evaluator_max_wait_s=EVALUATOR_MAX_WAIT_S,
     )
     self_play_pool.open()
 
@@ -150,6 +170,7 @@ def train(
         total_steps=total_train_steps,
         peak_lr=LEARNING_RATE,
         final_lr=FINAL_LEARNING_RATE,
+        warmup_fraction=WARMUP_FRACTION,
     )
     for param_group in optimizer.param_groups:
         param_group["lr"] = current_lr
@@ -157,12 +178,14 @@ def train(
     print("- Device: " + ("Cuda 🥰" if device.type == "cuda" else "CPU 🥹"))
     print(f"- Trainable parameters: {trainable_parameters:,}")
     print(f"- Self-play games per iteration: {GAMES_PER_ITERATION:,}")
+    print(f"- Self-play workers: {SELF_PLAY_WORKERS:,}")
+    print(f"- Live games per worker: {LIVE_GAMES_PER_WORKER:,}")
+    print(f"- Evaluator max batch size: {EVALUATOR_MAX_BATCH_SIZE:,}")
     print(f"- Evaluation workers: {EVALUATION_WORKERS:,}")
     print(f"- Total iterations: {NUM_ITERATIONS:,}")
-    print(f"- Dropout: {DROPOUT:.2f}")
     print(
         "- LR schedule: "
-        f"cosine decay from {format_learning_rate(LEARNING_RATE)} "
+        f"linear warmup over {WARMUP_FRACTION:.0%}, then cosine decay from {format_learning_rate(LEARNING_RATE)} "
         f"to {format_learning_rate(FINAL_LEARNING_RATE)}."
     )
     print()
@@ -227,6 +250,7 @@ def train(
                 total_steps=total_train_steps,
                 peak_lr=LEARNING_RATE,
                 final_lr=FINAL_LEARNING_RATE,
+                warmup_fraction=WARMUP_FRACTION,
             )
             iteration_bar.set_postfix({"lr": f"{current_lr:.4e}"})
             for param_group in optimizer.param_groups:
@@ -294,28 +318,29 @@ def train(
             )
 
             # Evaluating
-            checkpoint_winrates = {}
-            for evaluation_checkpoint_gap in EVAL_CHECKPOINT_GAPS:
-                if len(saved_checkpoint_paths) < evaluation_checkpoint_gap:
-                    continue
+            if not skip_evaluation:
+                checkpoint_winrates = {}
+                for evaluation_checkpoint_gap in EVAL_CHECKPOINT_GAPS:
+                    if len(saved_checkpoint_paths) < evaluation_checkpoint_gap:
+                        continue
 
-                winrate = previous_checkpoint_winrate(
-                    saved_checkpoint_paths[-evaluation_checkpoint_gap],
-                    checkpoint_path,
-                    num_simulations=NUM_SIMULATIONS_TRAINING,
-                    max_workers=EVALUATION_WORKERS,
-                    c_puct=C_PUCT,
-                )
-                checkpoint_winrates[f"gap_{evaluation_checkpoint_gap}"] = float(
-                    winrate
-                )
+                    winrate = previous_checkpoint_winrate(
+                        saved_checkpoint_paths[-evaluation_checkpoint_gap],
+                        checkpoint_path,
+                        num_simulations=NUM_SIMULATIONS_TRAINING,
+                        max_workers=EVALUATION_WORKERS,
+                        c_puct=C_PUCT,
+                    )
+                    checkpoint_winrates[f"gap_{evaluation_checkpoint_gap}"] = float(
+                        winrate
+                    )
 
-            if checkpoint_winrates:
-                writer.add_scalars(
-                    "e/checkpoint_winrate",
-                    checkpoint_winrates,
-                    iteration,
-                )
+                if checkpoint_winrates:
+                    writer.add_scalars(
+                        "e/checkpoint_winrate",
+                        checkpoint_winrates,
+                        iteration,
+                    )
 
             saved_checkpoint_paths.append(checkpoint_path)
 
@@ -344,17 +369,23 @@ if __name__ == "__main__":
     parser.add_argument(
         "--workers",
         type=int,
-        default=24,
-        help="Number of worker processes to use for checkpoint evaluation. Default: 24.",
+        default=8,
+        help="Number of CPU self-play workers to use. Also used as the evaluation worker cap. Default: 8.",
     )
     parser.add_argument(
         "--delete-existing-checkpoints",
         action="store_true",
         help="Delete existing iteration_*.pt checkpoints before training starts.",
     )
+    parser.add_argument(
+        "--skip-evaluation",
+        action="store_true",
+        help="Skip checkpoint-vs-checkpoint evaluation during training. Default: disabled.",
+    )
     args = parser.parse_args()
     train(
         delete_existing_checkpoints=args.delete_existing_checkpoints,
         num_iterations=args.num_iterations,
         workers=args.workers,
+        skip_evaluation=args.skip_evaluation,
     )

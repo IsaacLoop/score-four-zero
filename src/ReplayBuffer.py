@@ -5,7 +5,19 @@ import numpy as np
 from .Game import BOARD_SIZE
 
 
-def apply_symmetry(x, pi):
+def apply_symmetry(x: np.ndarray, pi: np.ndarray):
+    """The board has 6 (?) different symmetries, after which
+    the reasoning remains exactly the same. This function generates
+    new symmatrical boards to augment the data diversity seen
+    during training.
+
+    Args:
+        x (np.ndarray): Board, shape (2, 4, 4, 4)
+        pi (np.ndarray): Policy probabilities, shape (16,)
+
+    Returns:
+        tuple[np.ndarray, np.ndarray]: Board and policy probabilities, after applying a random symmetry.
+    """
     x_augmented = np.asarray(x, dtype=np.float32)
     pi_augmented = np.asarray(pi, dtype=np.float32).reshape(BOARD_SIZE, BOARD_SIZE)
 
@@ -36,6 +48,10 @@ def apply_symmetry(x, pi):
 
 
 class ReplayBuffer:
+    """
+    A memory buffer to remember moves, their outcomes,
+    and serve them back to train a model.
+    """
 
     def __init__(self, capacity: int):
         self.data = deque(maxlen=capacity)
@@ -55,11 +71,10 @@ class ReplayBuffer:
             batch_size <= len(self.data)
         ), "Not enough examples in the buffer to sample a batch."
         batch = random.sample(self.data, batch_size)
+        batch = [apply_symmetry(b[0], b[1]) for b in batch]
 
-        augmented_batch = [apply_symmetry(b[0], b[1]) for b in batch]
-
-        x_batch = np.stack([b[0] for b in augmented_batch])
-        pi_batch = np.stack([b[1] for b in augmented_batch])
+        x_batch = np.stack([b[0] for b in batch])
+        pi_batch = np.stack([b[1] for b in batch])
         z_batch = np.stack([b[2] for b in batch])
 
         return x_batch, pi_batch, z_batch
