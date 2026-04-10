@@ -97,13 +97,13 @@ def previous_checkpoint_winrate(
 
 def train(
     delete_existing_checkpoints: bool = False,
-    num_iterations: int = 300,
+    num_iterations: int = 30_000,
     workers: int = 8,
     skip_evaluation: bool = False,
 ):
     NUM_ITERATIONS = num_iterations
     GAMES_PER_ITERATION = 512
-    TRAIN_STEPS_PER_ITERATION = 1024
+    TRAIN_STEPS_PER_ITERATION = 2048
     BATCH_SIZE = 128
     REPLAY_BUFFER_SIZE = 500_000
 
@@ -111,10 +111,9 @@ def train(
     C_PUCT = 1.5
     DIRICHLET_ALPHA = 0.3
     DIRICHLET_EPSILON = 0.25
-    LEARNING_RATE = 2e-4
+    LEARNING_RATE = 5e-4
     FINAL_LEARNING_RATE = 0.0
-    WARMUP_FRACTION = 0.02
-    DROPOUT = 0.1
+    WARMUP_FRACTION = 0.0002
     CHECKPOINT_EVERY_ITERATIONS = 1
     EVAL_CHECKPOINT_GAPS = (2, 5, 10)
     WEIGHT_DECAY = 1e-4
@@ -137,7 +136,7 @@ def train(
         shutil.rmtree(TENSORBOARD_DIR)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = PVModel(dropout=DROPOUT).to(device)
+    model = PVModel().to(device)
     trainable_parameters = sum(
         parameter.numel() for parameter in model.parameters() if parameter.requires_grad
     )
@@ -363,8 +362,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num-iterations",
         type=int,
-        default=300,
-        help="Number of training iterations to run. Default: 300.",
+        default=30_000,
+        help="Number of training iterations to run. Default: 30000.",
     )
     parser.add_argument(
         "--workers",
