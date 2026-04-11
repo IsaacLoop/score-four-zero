@@ -41,9 +41,13 @@ DEFAULT_LIVE_REFRESH_INTERVAL_S = 0.1
 DEFAULT_ANCHOR_FIGHT_PROBABILITY = 0.5
 MIN_ANCHOR_FIGHT_PROBABILITY = 0.0
 MAX_ANCHOR_FIGHT_PROBABILITY = 1.0
+DEFAULT_FIGHT_TEMPERATURE = 0.5
+MIN_FIGHT_TEMPERATURE = 0.0
+MAX_FIGHT_TEMPERATURE = 1.0
 MIN_TEMPORAL_AVG_WINDOW = 5
 MAX_TEMPORAL_AVG_WINDOW = 10_000
 DEFAULT_TEMPORAL_AVG_WINDOW = 20
+UNDEREXPLORED_FIRST_PICK_BONUS = 2.0
 
 
 def build_temporal_avg_window_options():
@@ -106,9 +110,11 @@ class LiveCheckpointRanker:
         *,
         resume_state_path: Path = DEFAULT_RESUME_STATE_PATH,
         persist_resume_state: bool = False,
+        disable_anchors: bool = False,
         num_simulations: int = 25,
         max_workers: int = 16,
         c_puct: float = 1.5,
+        fight_temperature: float = DEFAULT_FIGHT_TEMPERATURE,
         elo_k: float = 10.0,
         matchup_distance_scale: float = 200.0,
         matchup_min_weight: float = 0.05,
@@ -122,10 +128,13 @@ class LiveCheckpointRanker:
         self.checkpoint_dir = checkpoint_dir
         self.resume_state_path = resume_state_path
         self.persist_resume_state = persist_resume_state
+        self.anchors_enabled = not bool(disable_anchors)
         self.num_simulations = num_simulations
         self.requested_max_workers = self._normalize_max_workers(max_workers)
         self.active_max_workers = self.requested_max_workers
         self.c_puct = c_puct
+        self.fight_temperature = self._normalize_fight_temperature(fight_temperature)
+        self.active_fight_temperature = self.fight_temperature
         self.elo_k = elo_k
         self.matchup_distance_scale = matchup_distance_scale
         self.matchup_min_weight = matchup_min_weight
@@ -139,12 +148,14 @@ class LiveCheckpointRanker:
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
 
-        self.anchors = load_legacy_anchors()
+        self.anchors = [] if not self.anchors_enabled else load_legacy_anchors()
         self.anchor_names = [anchor["name"] for anchor in self.anchors]
         self.anchor_paths = [anchor["path"] for anchor in self.anchors]
         self.anchor_iterations = [anchor["iteration"] for anchor in self.anchors]
         self.anchor_elos = [anchor["elo"] for anchor in self.anchors]
-        self.anchor_fight_probability = DEFAULT_ANCHOR_FIGHT_PROBABILITY
+        self.anchor_fight_probability = (
+            DEFAULT_ANCHOR_FIGHT_PROBABILITY if self.anchors_enabled else 0.0
+        )
         self.anchor_match_results_total = 0
         self.temporal_avg_window = DEFAULT_TEMPORAL_AVG_WINDOW
 
@@ -180,8 +191,10 @@ class LiveCheckpointRanker:
     def _resume_settings_snapshot(self):
         return {
             "checkpoint_dir": str(self.checkpoint_dir),
+            "anchors_enabled": bool(self.anchors_enabled),
             "num_simulations": int(self.num_simulations),
             "c_puct": float(self.c_puct),
+            "fight_temperature": float(self.fight_temperature),
             "elo_k": float(self.elo_k),
             "matchup_distance_scale": float(self.matchup_distance_scale),
             "matchup_min_weight": float(self.matchup_min_weight),
@@ -223,6 +236,22 @@ class LiveCheckpointRanker:
                 f"{MIN_ANCHOR_FIGHT_PROBABILITY:.0%} and {MAX_ANCHOR_FIGHT_PROBABILITY:.0%}"
             )
         return normalized_probability
+
+    @staticmethod
+    def _normalize_fight_temperature(fight_temperature: float) -> float:
+        normalized_temperature = float(fight_temperature)
+        if not (
+            MIN_FIGHT_TEMPERATURE
+            <= normalized_temperature
+            <= MAX_FIGHT_TEMPERATURE
+        ):
+            raise ValueError(
+                "fight_temperature must be between "
+                f"{MIN_FIGHT_TEMPERATURE:.0f} and {MAX_FIGHT_TEMPERATURE:.0f}"
+            )
+        if abs(normalized_temperature) < 1e-12:
+            return 0.0
+        return normalized_temperature
 
     @staticmethod
     def _normalize_temporal_avg_window(temporal_avg_window: int) -> int:
@@ -398,6 +427,10 @@ class LiveCheckpointRanker:
             return dict(self._summary_snapshot)
 
     def set_anchor_fight_probability(self, anchor_fight_probability: float):
+        if not self.anchors_enabled:
+            with self._lock:
+                return dict(self._summary_snapshot)
+
         normalized_probability = self._normalize_anchor_fight_probability(
             anchor_fight_probability
         )
@@ -421,6 +454,17 @@ class LiveCheckpointRanker:
             self._refresh_metadata_unlocked()
             return dict(self._summary_snapshot)
 
+    def set_fight_temperature(self, fight_temperature: float):
+        normalized_temperature = self._normalize_fight_temperature(fight_temperature)
+
+        with self._lock:
+            if normalized_temperature == self.fight_temperature:
+                return dict(self._summary_snapshot)
+
+            self.fight_temperature = normalized_temperature
+            self._refresh_metadata_unlocked()
+            return dict(self._summary_snapshot)
+
     def run_forever(self):
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
@@ -433,8 +477,13 @@ class LiveCheckpointRanker:
             while not self._stop_event.is_set():
                 self._discover_new_models()
                 desired_workers = self._get_requested_max_workers()
+                desired_fight_temperature = self._get_requested_fight_temperature()
 
-                if fight_pool is None or desired_workers != self.active_max_workers:
+                if (
+                    fight_pool is None
+                    or desired_workers != self.active_max_workers
+                    or desired_fight_temperature != self.active_fight_temperature
+                ):
                     if fight_pool is not None:
                         fight_pool.close()
 
@@ -443,10 +492,12 @@ class LiveCheckpointRanker:
                         num_simulations=self.num_simulations,
                         max_workers=desired_workers,
                         c_puct=self.c_puct,
+                        temperature=desired_fight_temperature,
                         max_tasks_per_child=self.max_tasks_per_child,
                     )
                     fight_pool.open()
                     self._set_active_max_workers(desired_workers)
+                    self._set_active_fight_temperature(desired_fight_temperature)
                     active_samples_by_path_matchup = {}
                     queued_sample = None
                     queued_path_matchup = None
@@ -482,7 +533,11 @@ class LiveCheckpointRanker:
                             break
 
                         path_matchup = self._path_matchup_from_sample(sample)
-                        cached_result = fight_pool.result_cache.get(path_matchup)
+                        cached_result = (
+                            fight_pool.result_cache.get(path_matchup)
+                            if fight_pool.cache_enabled
+                            else None
+                        )
                         if cached_result is not None:
                             sampled_cached_updates.append((sample, cached_result, True))
                             made_progress = True
@@ -584,6 +639,10 @@ class LiveCheckpointRanker:
                 "cached_match_results_total": int(self.cached_match_results_total),
                 "uncached_match_results_total": int(self.uncached_match_results_total),
                 "anchor_match_results_total": int(self.anchor_match_results_total),
+                "fight_cache_enabled": bool(self.fight_temperature == 0.0),
+                "fight_temperature": float(self.fight_temperature),
+                "active_fight_temperature": float(self.active_fight_temperature),
+                "anchors_enabled": bool(self.anchors_enabled),
                 "mean_elo": mean_elo,
                 "max_elo": max_elo,
                 "elo_k": float(self.elo_k),
@@ -648,6 +707,10 @@ class LiveCheckpointRanker:
         with self._lock:
             return int(self.requested_max_workers)
 
+    def _get_requested_fight_temperature(self):
+        with self._lock:
+            return float(self.fight_temperature)
+
     def _set_active_max_workers(self, max_workers: int):
         with self._lock:
             normalized_workers = self._normalize_max_workers(max_workers)
@@ -655,6 +718,17 @@ class LiveCheckpointRanker:
                 return
 
             self.active_max_workers = normalized_workers
+            self._refresh_metadata_unlocked()
+
+    def _set_active_fight_temperature(self, fight_temperature: float):
+        with self._lock:
+            normalized_temperature = self._normalize_fight_temperature(
+                fight_temperature
+            )
+            if normalized_temperature == self.active_fight_temperature:
+                return
+
+            self.active_fight_temperature = normalized_temperature
             self._refresh_metadata_unlocked()
 
     def _checkpoint_paths(self):
@@ -711,10 +785,27 @@ class LiveCheckpointRanker:
                 return None
             return self._sample_one_unlocked()
 
+    def _sample_first_model_index_unlocked(self):
+        fight_counts = np.asarray(self.fight_counts, dtype=np.float64)
+        mean_fight_count = float(np.mean(fight_counts))
+        if not np.isfinite(mean_fight_count) or mean_fight_count <= 0.0:
+            return int(np.random.randint(len(self.model_paths)))
+
+        deficits = np.maximum(0.0, mean_fight_count - fight_counts)
+        weights = 1.0 + UNDEREXPLORED_FIRST_PICK_BONUS * (
+            deficits / mean_fight_count
+        )
+        probabilities = weights / weights.sum()
+        return int(np.random.choice(len(self.model_paths), p=probabilities))
+
     def _sample_one_unlocked(self):
-        idx1 = int(np.random.randint(len(self.model_paths)))
+        idx1 = self._sample_first_model_index_unlocked()
         swapped = bool(np.random.rand() < 0.5)
-        if self.anchor_paths and np.random.rand() < self.anchor_fight_probability:
+        if (
+            self.anchors_enabled
+            and self.anchor_paths
+            and np.random.rand() < self.anchor_fight_probability
+        ):
             anchor_idx = self._closest_anchor_index_unlocked(idx1)
             return ("anchor", idx1, anchor_idx, swapped)
 
@@ -931,6 +1022,30 @@ def make_handler(ranker: LiveCheckpointRanker):
                 self._send_json(snapshot)
                 return
 
+            if parsed_url.path == "/api/fight-temperature":
+                try:
+                    payload = self._read_json()
+                    snapshot = ranker.set_fight_temperature(
+                        payload["fight_temperature"]
+                    )
+                except (KeyError, TypeError, json.JSONDecodeError):
+                    self._send_json(
+                        {
+                            "error": "Request body must be valid JSON with fight_temperature."
+                        },
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+                except ValueError as exc:
+                    self._send_json(
+                        {"error": str(exc)},
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+
+                self._send_json(snapshot)
+                return
+
             if parsed_url.path == "/api/temporal-average-window":
                 try:
                     payload = self._read_json()
@@ -1003,6 +1118,11 @@ def main():
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--checkpoint-dir", type=Path, default=DEFAULT_CHECKPOINT_DIR)
     parser.add_argument("--workers", type=int, default=16)
+    parser.add_argument(
+        "--disable-anchors",
+        action="store_true",
+        help="Disable all anchor-related ranking, stats, and UI.",
+    )
     parser.add_argument("--num-simulations", type=int, default=25)
     parser.add_argument("--c-puct", type=float, default=1.5)
     parser.add_argument("--elo-k", type=float, default=10.0)
@@ -1024,11 +1144,11 @@ def main():
         parser.error(
             f"--workers must be between {MIN_WORKERS} and {MAX_WORKERS}"
         )
-
     ranker = LiveCheckpointRanker(
         checkpoint_dir=args.checkpoint_dir.resolve(),
         resume_state_path=DEFAULT_RESUME_STATE_PATH,
         persist_resume_state=args.resume,
+        disable_anchors=args.disable_anchors,
         num_simulations=args.num_simulations,
         max_workers=args.workers,
         c_puct=args.c_puct,
