@@ -3,12 +3,14 @@ CPU workers run MCTS and environment updates.
 One central GPU evaluator owns the model and micro-batches leaf inference.
 """
 
+import math
 import queue
 import time
 import traceback
 from multiprocessing import get_context
 
 import numpy as np
+import torch
 from tqdm import tqdm
 
 from .Env import Env
@@ -25,6 +27,26 @@ class _LiveSelfPlayGame:
         self.trajectory = []
         self.move_index = 0
         self.root = None
+
+
+class _DirectCpuEvaluator:
+
+    def __init__(self, model):
+        self.model = model
+
+    def evaluate(self, x_batch):
+        x_batch = np.ascontiguousarray(x_batch, dtype=np.float32)
+        x_batch = torch.as_tensor(
+            x_batch,
+            dtype=torch.float32,
+            device="cpu",
+        )
+        with torch.inference_mode():
+            policy_logits_batch, value_batch = self.model(x_batch)
+        return (
+            policy_logits_batch.detach().cpu().numpy(),
+            value_batch.squeeze(-1).detach().cpu().numpy(),
+        )
 
 
 class SelfPlayWorker:
@@ -52,6 +74,10 @@ class SelfPlayWorker:
         result_queue,
         progress_queue,
         game_index_queue,
+        live_game_counter,
+        cpu_tail_live_games: int,
+        cpu_model_class,
+        cpu_model_state_dict,
     ):
         self.worker_id = int(worker_id)
         self.initial_game_indices = list(initial_game_indices)
@@ -62,6 +88,7 @@ class SelfPlayWorker:
         self.result_queue = result_queue
         self.progress_queue = progress_queue
         self.game_index_queue = game_index_queue
+        self.live_game_counter = live_game_counter
         self.mcts_helper = MCTS(
             model=None,
             num_simulations=num_simulations,
@@ -70,11 +97,18 @@ class SelfPlayWorker:
         )
         self.dirichlet_alpha = dirichlet_alpha
         self.dirichlet_epsilon = dirichlet_epsilon
+        self.cpu_tail_live_games = int(cpu_tail_live_games)
         self.gpu_evaluator = GpuBatchEvaluatorClient(
             worker_id=self.worker_id,
             request_queue=request_queue,
             response_queue=response_queue,
         )
+        self.cpu_evaluator = None
+        if self.cpu_tail_live_games > 0:
+            cpu_model = cpu_model_class().to("cpu")
+            cpu_model.load_state_dict(cpu_model_state_dict)
+            cpu_model.eval()
+            self.cpu_evaluator = _DirectCpuEvaluator(cpu_model)
         self.cpu_search_backprop_s = 0.0
 
     def run(self):
@@ -125,6 +159,9 @@ class SelfPlayWorker:
                     replacement_live_game = self._start_live_game_from_queue()
                     if replacement_live_game is not None:
                         next_live_games.append(replacement_live_game)
+                    else:
+                        with self.live_game_counter.get_lock():
+                            self.live_game_counter.value -= 1
                     self.progress_queue.put(1)
                 else:
                     next_live_games.append(live_game)
@@ -182,7 +219,13 @@ class SelfPlayWorker:
                 for pending_node in pending_nodes
             ]
         )
-        policy_logits_batch, value_batch = self.gpu_evaluator.evaluate(x_batch)
+        evaluator = self.gpu_evaluator
+        if (
+            self.cpu_evaluator is not None
+            and self.live_game_counter.value <= self.cpu_tail_live_games
+        ):
+            evaluator = self.cpu_evaluator
+        policy_logits_batch, value_batch = evaluator.evaluate(x_batch)
 
         for pending_node, policy_logits, value in zip(
             pending_nodes,
@@ -293,6 +336,10 @@ def _run_self_play_worker(
     result_queue,
     progress_queue,
     game_index_queue,
+    live_game_counter,
+    cpu_tail_live_games: int,
+    cpu_model_class,
+    cpu_model_state_dict,
 ):
     try:
         worker = SelfPlayWorker(
@@ -311,6 +358,10 @@ def _run_self_play_worker(
             result_queue=result_queue,
             progress_queue=progress_queue,
             game_index_queue=game_index_queue,
+            live_game_counter=live_game_counter,
+            cpu_tail_live_games=cpu_tail_live_games,
+            cpu_model_class=cpu_model_class,
+            cpu_model_state_dict=cpu_model_state_dict,
         )
         worker.run()
     except Exception:
@@ -334,6 +385,7 @@ class ParallelSelfPlayPool:
         live_games_per_worker: int = 64,
         evaluator_max_batch_size: int = 1024,
         evaluator_max_wait_s: float = 0.001,
+        cpu_tail_fraction: float = 0.10,
     ):
         self.num_simulations = num_simulations
         self.c_puct = c_puct
@@ -343,6 +395,7 @@ class ParallelSelfPlayPool:
         self.live_games_per_worker = int(live_games_per_worker)
         self.evaluator_max_batch_size = int(evaluator_max_batch_size)
         self.evaluator_max_wait_s = float(evaluator_max_wait_s)
+        self.cpu_tail_fraction = float(cpu_tail_fraction)
         self.mp_context = get_context("spawn")
 
     def open(self):
@@ -385,6 +438,20 @@ class ParallelSelfPlayPool:
         game_index_queue = self.mp_context.Queue()
         worker_processes = []
         initial_game_count = min(total_games, total_live_games)
+        live_game_counter = self.mp_context.Value("i", initial_game_count)
+        cpu_tail_live_games = 0
+        cpu_model_class = None
+        cpu_model_state_dict = None
+        if next(model.parameters()).device.type == "cuda" and self.cpu_tail_fraction > 0.0:
+            cpu_tail_live_games = max(
+                1,
+                math.ceil(total_games * self.cpu_tail_fraction),
+            )
+            cpu_model_class = model.__class__
+            cpu_model_state_dict = {
+                key: value.detach().cpu()
+                for key, value in model.state_dict().items()
+            }
         base_initial_games_per_worker = initial_game_count // worker_count
         extra_initial_games = initial_game_count % worker_count
         next_game_index = 0
@@ -439,6 +506,10 @@ class ParallelSelfPlayPool:
                         "result_queue": result_queue,
                         "progress_queue": progress_queue,
                         "game_index_queue": game_index_queue,
+                        "live_game_counter": live_game_counter,
+                        "cpu_tail_live_games": cpu_tail_live_games,
+                        "cpu_model_class": cpu_model_class,
+                        "cpu_model_state_dict": cpu_model_state_dict,
                     },
                 )
                 process.start()

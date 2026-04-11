@@ -18,11 +18,12 @@ _WORKER_MODEL_CACHE = {}
 _WORKER_EVAL_CACHE = {}
 _WORKER_NUM_SIMULATIONS = None
 _WORKER_C_PUCT = None
+_WORKER_TEMPERATURE = None
 _LEGACY_ANCHOR_DIR = (Path(__file__).resolve().parent.parent / "anchors" / "legacy_pv_model").resolve()
 
 
-def _init_fight_worker(num_simulations: int, c_puct: float):
-    global _WORKER_MODEL_CACHE, _WORKER_EVAL_CACHE, _WORKER_NUM_SIMULATIONS, _WORKER_C_PUCT
+def _init_fight_worker(num_simulations: int, c_puct: float, temperature: float):
+    global _WORKER_MODEL_CACHE, _WORKER_EVAL_CACHE, _WORKER_NUM_SIMULATIONS, _WORKER_C_PUCT, _WORKER_TEMPERATURE
 
     torch.set_num_threads(1)
     try:
@@ -34,6 +35,7 @@ def _init_fight_worker(num_simulations: int, c_puct: float):
     _WORKER_EVAL_CACHE = {}
     _WORKER_NUM_SIMULATIONS = num_simulations
     _WORKER_C_PUCT = c_puct
+    _WORKER_TEMPERATURE = temperature
 
 
 def _get_cached_model(model_path: str):
@@ -78,12 +80,18 @@ def _fight_worker(model_path_1: str, model_path_2: str):
     while not env.is_terminal():
         if env.current_player() == -1:
             root1 = mcts1.run(root_env=env, root=root1)
-            pi = mcts1.visit_counts_to_policy(root=root1, temperature=0.0)
-            action = int(pi.argmax())
+            pi = mcts1.visit_counts_to_policy(root=root1, temperature=_WORKER_TEMPERATURE)
+            if _WORKER_TEMPERATURE > 0.0:
+                action = int(np.random.choice(len(pi), p=pi))
+            else:
+                action = int(pi.argmax())
         else:
             root2 = mcts2.run(root_env=env, root=root2)
-            pi = mcts2.visit_counts_to_policy(root=root2, temperature=0.0)
-            action = int(pi.argmax())
+            pi = mcts2.visit_counts_to_policy(root=root2, temperature=_WORKER_TEMPERATURE)
+            if _WORKER_TEMPERATURE > 0.0:
+                action = int(np.random.choice(len(pi), p=pi))
+            else:
+                action = int(pi.argmax())
 
         env.step(action)
         if root1 is not None:
@@ -155,6 +163,7 @@ def parallel_fight_results(
     num_simulations: int,
     max_workers: int = 24,
     c_puct: float = 1.5,
+    temperature: float = 0.0,
     desc: str = "Fights",
 ):
     with ParallelFightPool(
@@ -162,6 +171,7 @@ def parallel_fight_results(
         num_simulations=num_simulations,
         max_workers=max_workers,
         c_puct=c_puct,
+        temperature=temperature,
     ) as fight_pool:
         return fight_pool.fight_results(matchups, desc=desc)
 
@@ -174,6 +184,7 @@ class ParallelFightPool:
         num_simulations: int,
         max_workers: int = 24,
         c_puct: float = 1.5,
+        temperature: float = 0.0,
         max_tasks_per_child: int | None = None,
         task_batch_size: int = 1,
     ):
@@ -181,11 +192,13 @@ class ParallelFightPool:
         self.num_simulations = num_simulations
         self.max_workers = max_workers
         self.c_puct = c_puct
+        self.temperature = float(temperature)
         self.max_tasks_per_child = max_tasks_per_child
         self.task_batch_size = max(1, int(task_batch_size))
         self.executor = None
         self.pending_futures = {}
         self.result_cache = {}
+        self.cache_enabled = self.temperature == 0.0
 
     def open(self):
         if self.executor is not None:
@@ -195,7 +208,7 @@ class ParallelFightPool:
             max_workers=self.max_workers,
             mp_context=get_context("spawn"),
             initializer=_init_fight_worker,
-            initargs=(self.num_simulations, self.c_puct),
+            initargs=(self.num_simulations, self.c_puct, self.temperature),
             max_tasks_per_child=self.max_tasks_per_child,
         )
         self.pending_futures = {}
@@ -244,7 +257,8 @@ class ParallelFightPool:
         for future in done_futures:
             path_matchup = self.pending_futures.pop(future)
             result = future.result()
-            self.result_cache[path_matchup] = result
+            if self.cache_enabled:
+                self.result_cache[path_matchup] = result
             completed_path_results.append((path_matchup, result))
 
         return completed_path_results
@@ -283,7 +297,7 @@ class ParallelFightPool:
         uncached_chunks = []
 
         for matchup_index, path_matchup in enumerate(path_matchups):
-            cached_result = self.result_cache.get(path_matchup)
+            cached_result = self.result_cache.get(path_matchup) if self.cache_enabled else None
             if cached_result is not None:
                 cached_results.append((matchup_index, cached_result))
                 continue
@@ -335,7 +349,8 @@ class ParallelFightPool:
                     chunk = future_to_chunk.pop(future)
                     results = future.result()
                     for (matchup_index, path_matchup), result in zip(chunk, results):
-                        self.result_cache[path_matchup] = result
+                        if self.cache_enabled:
+                            self.result_cache[path_matchup] = result
                         if progress_bar is not None:
                             progress_bar.update(1)
                         if include_cache_status:
@@ -384,6 +399,7 @@ class ParallelEloPool:
         num_simulations: int,
         max_workers: int = 24,
         c_puct: float = 1.5,
+        temperature: float = 0.0,
         elo_k: float = 20.0,
         matchmaking_distance_scale: float = 200.0,
         matchmaking_min_weight: float = 0.05,
@@ -398,6 +414,7 @@ class ParallelEloPool:
             num_simulations=num_simulations,
             max_workers=max_workers,
             c_puct=c_puct,
+            temperature=temperature,
             max_tasks_per_child=max_tasks_per_child,
         )
 

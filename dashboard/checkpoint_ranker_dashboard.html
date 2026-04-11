@@ -60,6 +60,10 @@
       box-sizing: border-box;
     }
 
+    [hidden] {
+      display: none !important;
+    }
+
     body {
       margin: 0;
       font-family: Arial, sans-serif;
@@ -681,7 +685,7 @@
             <span id="total-matches-rate" class="stat-inline-detail"></span>
           </div>
         </div>
-        <div class="panel stat">
+        <div class="panel stat" id="fight-cache-card" hidden>
           <div class="stat-label">Fight Cache</div>
           <div class="stat-table">
             <div class="stat-table-label">Hit rate</div>
@@ -691,8 +695,9 @@
             <div class="stat-table-label">Uncached /s</div>
             <div class="stat-table-value" id="uncached-matches-rate-value">-</div>
           </div>
+          <div class="stat-note" id="cache-note"></div>
         </div>
-        <div class="panel stat">
+        <div class="panel stat" id="anchor-card" hidden>
           <div class="stat-label">Anchoring</div>
           <div class="stat-table">
             <div class="stat-table-label">Anchors</div>
@@ -745,6 +750,18 @@
               <span id="worker-count-slider-value">16 workers</span>
             </div>
             <input id="worker-count-slider" type="range" min="1" max="24" value="16" step="1">
+          </div>
+        </div>
+        <div class="panel stat">
+          <div class="stat-label">Fight Temperature</div>
+          <div class="stat-value" id="fight-temperature-value">0.50</div>
+          <div class="stat-note" id="fight-temperature-note"></div>
+          <div class="control-stack">
+            <div class="slider-label">
+              <span>Temperature</span>
+              <span id="fight-temperature-slider-value">0.50</span>
+            </div>
+            <input id="fight-temperature-slider" type="range" min="0" max="1" value="0.5" step="0.01">
           </div>
         </div>
         <div class="panel stat" id="moving-average-card">
@@ -871,6 +888,11 @@
     let anchorFightProbabilityUpdateError = "";
     let isAnchorRateSliderPointerDown = false;
     let suppressNextAnchorRateSliderChange = false;
+    let pendingFightTemperature = null;
+    let isUpdatingFightTemperature = false;
+    let fightTemperatureUpdateError = "";
+    let isFightTemperatureSliderPointerDown = false;
+    let suppressNextFightTemperatureSliderChange = false;
     let temporalAverageEnabled = false;
     let pendingTemporalAverageWindow = null;
     let isUpdatingTemporalAverageWindow = false;
@@ -911,6 +933,10 @@
     const anchorRateNote = document.getElementById("anchor-rate-note");
     const anchorRateSlider = document.getElementById("anchor-rate-slider");
     const anchorRateSliderValue = document.getElementById("anchor-rate-slider-value");
+    const fightTemperatureValue = document.getElementById("fight-temperature-value");
+    const fightTemperatureNote = document.getElementById("fight-temperature-note");
+    const fightTemperatureSlider = document.getElementById("fight-temperature-slider");
+    const fightTemperatureSliderValue = document.getElementById("fight-temperature-slider-value");
     const totalMatchesValue = document.getElementById("total-matches-value");
     const totalMatchesRate = document.getElementById("total-matches-rate");
     const trackedCheckpointCard = document.getElementById("tracked-checkpoint-card");
@@ -924,6 +950,9 @@
     const cacheHitRateValue = document.getElementById("cache-hit-rate-value");
     const cachedMatchesRateValue = document.getElementById("cached-matches-rate-value");
     const uncachedMatchesRateValue = document.getElementById("uncached-matches-rate-value");
+    const cacheNote = document.getElementById("cache-note");
+    const fightCacheCard = document.getElementById("fight-cache-card");
+    const anchorCard = document.getElementById("anchor-card");
     const anchorCountValue = document.getElementById("anchor-count-value");
     const anchorTargetRateValue = document.getElementById("anchor-target-rate-value");
     const anchorActualRateValue = document.getElementById("anchor-actual-rate-value");
@@ -1049,6 +1078,17 @@
 
     function syncAnchorRateLabel(value = Number(anchorRateSlider.value)) {
       anchorRateSliderValue.textContent = formatPercent(Number(value) / 100, 0);
+    }
+
+    function formatFightTemperature(value) {
+      return Number(value).toLocaleString("en-US", {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      });
+    }
+
+    function syncFightTemperatureLabel(value = Number(fightTemperatureSlider.value)) {
+      fightTemperatureSliderValue.textContent = formatFightTemperature(value);
     }
 
     function normalizeTemporalAverageWindowOptions(rawOptions) {
@@ -1396,6 +1436,59 @@
       }
 
       anchorRateNote.textContent = "";
+    }
+
+    function updateFightTemperatureCard(snapshot = currentSummary) {
+      const liveConfigSnapshot = currentSummary ?? snapshot ?? null;
+      const requestedFightTemperature = Number(
+        liveConfigSnapshot?.fight_temperature ?? Number.NaN,
+      );
+      const activeFightTemperature = Number(
+        liveConfigSnapshot?.active_fight_temperature ?? Number.NaN,
+      );
+      const displayedFightTemperature = pendingFightTemperature ?? (
+        Number.isFinite(requestedFightTemperature) ? requestedFightTemperature : null
+      );
+
+      fightTemperatureValue.textContent =
+        displayedFightTemperature === null
+          ? "-"
+          : formatFightTemperature(displayedFightTemperature);
+
+      if (pendingFightTemperature !== null) {
+        fightTemperatureSlider.value = String(pendingFightTemperature);
+      } else if (Number.isFinite(requestedFightTemperature)) {
+        fightTemperatureSlider.value = String(requestedFightTemperature);
+      }
+      syncFightTemperatureLabel();
+      fightTemperatureSlider.disabled = isUpdatingFightTemperature;
+
+      if (fightTemperatureUpdateError) {
+        fightTemperatureNote.textContent = fightTemperatureUpdateError;
+        return;
+      }
+
+      if (isUpdatingFightTemperature) {
+        fightTemperatureNote.textContent = "Updating fight temperature...";
+        return;
+      }
+
+      if (
+        displayedFightTemperature !== null
+        && Number.isFinite(activeFightTemperature)
+        && activeFightTemperature !== displayedFightTemperature
+      ) {
+        fightTemperatureNote.textContent =
+          `Applying after the current batch. Running: ${formatFightTemperature(activeFightTemperature)}.`;
+        return;
+      }
+
+      if (Number.isFinite(displayedFightTemperature) && displayedFightTemperature > 0) {
+        fightTemperatureNote.textContent = "Fight-result cache is disabled while temperature is non-zero.";
+        return;
+      }
+
+      fightTemperatureNote.textContent = "";
     }
 
     function updateTemporalAverageCard(snapshot = currentSummary) {
@@ -3929,16 +4022,20 @@
     function updateStats(snapshot) {
       updateWorkerCountCard(snapshot);
       updateAnchorRateCard(snapshot);
+      updateFightTemperatureCard(snapshot);
       updateTemporalAverageCard(snapshot);
       syncModeDependentCards();
+      anchorCard.hidden = snapshot?.anchors_enabled !== true;
 
       if (!snapshot) {
+        fightCacheCard.hidden = true;
         document.getElementById("num-models-value").textContent = "-";
         totalMatchesValue.textContent = "-";
         totalMatchesRate.textContent = "";
         cacheHitRateValue.textContent = "-";
         cachedMatchesRateValue.textContent = "-";
         uncachedMatchesRateValue.textContent = "-";
+        cacheNote.textContent = "";
         anchorCountValue.textContent = "-";
         anchorTargetRateValue.textContent = "-";
         anchorActualRateValue.textContent = "-";
@@ -3965,18 +4062,31 @@
         recentMatchStats?.totalRate === undefined || recentMatchStats?.totalRate === null
           ? ""
           : ` (${formatNumber(recentMatchStats.totalRate)} matches per second)`;
-      cacheHitRateValue.textContent = recentMatchStats?.cacheHitRate === undefined
-        || recentMatchStats?.cacheHitRate === null
-        ? "-"
-        : formatPercent(recentMatchStats.cacheHitRate);
-      cachedMatchesRateValue.textContent = recentMatchStats?.cachedRate === undefined
-        || recentMatchStats?.cachedRate === null
-        ? "-"
-        : formatNumber(recentMatchStats.cachedRate);
-      uncachedMatchesRateValue.textContent = recentMatchStats?.uncachedRate === undefined
-        || recentMatchStats?.uncachedRate === null
-        ? "-"
-        : formatNumber(recentMatchStats.uncachedRate);
+      const fightCacheEnabled = snapshot?.fight_cache_enabled !== false;
+      fightCacheCard.hidden = !fightCacheEnabled;
+      if (!fightCacheEnabled) {
+        cacheHitRateValue.textContent = "disabled";
+        cachedMatchesRateValue.textContent = "0.0";
+        uncachedMatchesRateValue.textContent = recentMatchStats?.totalRate === undefined
+          || recentMatchStats?.totalRate === null
+          ? "-"
+          : formatNumber(recentMatchStats.totalRate);
+        cacheNote.textContent = "Disabled while fight temperature is non-zero.";
+      } else {
+        cacheHitRateValue.textContent = recentMatchStats?.cacheHitRate === undefined
+          || recentMatchStats?.cacheHitRate === null
+          ? "-"
+          : formatPercent(recentMatchStats.cacheHitRate);
+        cachedMatchesRateValue.textContent = recentMatchStats?.cachedRate === undefined
+          || recentMatchStats?.cachedRate === null
+          ? "-"
+          : formatNumber(recentMatchStats.cachedRate);
+        uncachedMatchesRateValue.textContent = recentMatchStats?.uncachedRate === undefined
+          || recentMatchStats?.uncachedRate === null
+          ? "-"
+          : formatNumber(recentMatchStats.uncachedRate);
+        cacheNote.textContent = "";
+      }
       anchorCountValue.textContent = formatInteger(snapshot.num_anchors);
       anchorTargetRateValue.textContent = formatPercent(snapshot.anchor_fight_probability, 0);
       anchorActualRateValue.textContent =
@@ -4438,6 +4548,57 @@
       void submitAnchorFightProbability(Number(anchorRateSlider.value));
     }
 
+    async function submitFightTemperature(nextFightTemperature) {
+      const normalizedFightTemperature = Number(nextFightTemperature);
+      const currentFightTemperature = Number(
+        currentSummary?.fight_temperature ?? Number.NaN,
+      );
+
+      if (!Number.isFinite(normalizedFightTemperature)) {
+        return;
+      }
+
+      fightTemperatureUpdateError = "";
+
+      if (normalizedFightTemperature === currentFightTemperature) {
+        pendingFightTemperature = null;
+        updateFightTemperatureCard();
+        return;
+      }
+
+      pendingFightTemperature = normalizedFightTemperature;
+      isUpdatingFightTemperature = true;
+      updateFightTemperatureCard();
+
+      try {
+        const payload = await fetchJson(
+          "/api/fight-temperature",
+          "fight temperature update",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              fight_temperature: normalizedFightTemperature,
+            }),
+          },
+        );
+
+        currentSummary = payload;
+      } catch (error) {
+        fightTemperatureUpdateError = `Fight temperature update failed: ${error.message}`;
+      } finally {
+        pendingFightTemperature = null;
+        isUpdatingFightTemperature = false;
+        renderDisplayedSnapshot({ animateChart: false, force: true });
+      }
+    }
+
+    function commitFightTemperatureSliderValue() {
+      void submitFightTemperature(Number(fightTemperatureSlider.value));
+    }
+
     async function submitTemporalAverageWindow(nextTemporalAverageWindow) {
       const normalizedTemporalAverageWindow = Number(nextTemporalAverageWindow);
       const currentTemporalAverageWindow = Number(
@@ -4651,6 +4812,27 @@
       }
     });
 
+    fightTemperatureSlider.addEventListener("input", () => {
+      pendingFightTemperature = Number(fightTemperatureSlider.value);
+      fightTemperatureUpdateError = "";
+      updateFightTemperatureCard();
+    });
+
+    fightTemperatureSlider.addEventListener("pointerdown", () => {
+      isFightTemperatureSliderPointerDown = true;
+    });
+
+    fightTemperatureSlider.addEventListener("change", () => {
+      if (suppressNextFightTemperatureSliderChange) {
+        suppressNextFightTemperatureSliderChange = false;
+        return;
+      }
+
+      if (!isFightTemperatureSliderPointerDown) {
+        commitFightTemperatureSliderValue();
+      }
+    });
+
     temporalAverageCheckbox.addEventListener("change", () => {
       temporalAverageEnabled = temporalAverageCheckbox.checked;
       saveUiSettings();
@@ -4718,6 +4900,12 @@
         commitAnchorRateSliderValue();
       }
 
+      if (isFightTemperatureSliderPointerDown) {
+        isFightTemperatureSliderPointerDown = false;
+        suppressNextFightTemperatureSliderChange = true;
+        commitFightTemperatureSliderValue();
+      }
+
       if (isTemporalAverageSliderPointerDown) {
         isTemporalAverageSliderPointerDown = false;
         suppressNextTemporalAverageSliderChange = true;
@@ -4730,6 +4918,8 @@
       suppressNextWorkerSliderChange = false;
       isAnchorRateSliderPointerDown = false;
       suppressNextAnchorRateSliderChange = false;
+      isFightTemperatureSliderPointerDown = false;
+      suppressNextFightTemperatureSliderChange = false;
       isTemporalAverageSliderPointerDown = false;
       suppressNextTemporalAverageSliderChange = false;
     });
@@ -4749,6 +4939,7 @@
     syncModeDependentCards();
     syncWorkerCountLabel();
     syncAnchorRateLabel();
+    syncFightTemperatureLabel();
     syncTemporalAverageWindowSliderOptions();
     temporalAverageWindowSlider.value = String(
       findTemporalAverageWindowOptionIndex(20, temporalAverageWindowOptions),
