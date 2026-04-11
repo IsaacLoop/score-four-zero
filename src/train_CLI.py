@@ -43,6 +43,17 @@ def format_learning_rate(value: float):
     return f"{value:.0e}".replace("e-0", "e-").replace("e+0", "e+")
 
 
+def checkpoint_iteration_from_path(checkpoint_path: Path) -> int:
+    return int(checkpoint_path.stem.split("_")[-1])
+
+
+def sorted_iteration_checkpoint_paths(checkpoint_dir: Path):
+    return sorted(
+        checkpoint_dir.glob("iteration_*.pt"),
+        key=checkpoint_iteration_from_path,
+    )
+
+
 def previous_checkpoint_winrate(
     previous_checkpoint_path: Path,
     current_checkpoint_path: Path,
@@ -96,15 +107,16 @@ def previous_checkpoint_winrate(
 
 
 def train(
+    num_iterations: int,
     delete_existing_checkpoints: bool = False,
-    num_iterations: int = 30_000,
     workers: int = 8,
     skip_evaluation: bool = False,
+    resume: bool = False,
 ):
     NUM_ITERATIONS = num_iterations
     GAMES_PER_ITERATION = 512
     TRAIN_STEPS_PER_ITERATION = 2048
-    BATCH_SIZE = 128
+    BATCH_SIZE = 512
     REPLAY_BUFFER_SIZE = 500_000
 
     NUM_SIMULATIONS_TRAINING = 100
@@ -113,7 +125,7 @@ def train(
     DIRICHLET_EPSILON = 0.25
     LEARNING_RATE = 5e-4
     FINAL_LEARNING_RATE = 0.0
-    WARMUP_FRACTION = 0.0002
+    WARMUP_FRACTION = 0.01
     CHECKPOINT_EVERY_ITERATIONS = 1
     EVAL_CHECKPOINT_GAPS = (2, 5, 10)
     WEIGHT_DECAY = 1e-4
@@ -123,16 +135,19 @@ def train(
     LIVE_GAMES_PER_WORKER = 64
     EVALUATOR_MAX_BATCH_SIZE = 1024
     EVALUATOR_MAX_WAIT_S = 0.001
+    CPU_TAIL_FRACTION = 0.10
     EVALUATION_WORKERS = min(workers, os.cpu_count() or 1)
     TENSORBOARD_DIR = Path("tb_logs")
 
     CHECKPOINT_DIR = Path("checkpoints")
 
     CHECKPOINT_DIR.mkdir(exist_ok=True)
+    if resume and delete_existing_checkpoints:
+        raise ValueError("--resume and --delete-existing-checkpoints cannot be used together.")
     if delete_existing_checkpoints:
         for checkpoint_path in CHECKPOINT_DIR.glob("iteration_*.pt"):
             checkpoint_path.unlink()
-    if TENSORBOARD_DIR.exists():
+    if TENSORBOARD_DIR.exists() and not resume:
         shutil.rmtree(TENSORBOARD_DIR)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -156,13 +171,23 @@ def train(
         live_games_per_worker=LIVE_GAMES_PER_WORKER,
         evaluator_max_batch_size=EVALUATOR_MAX_BATCH_SIZE,
         evaluator_max_wait_s=EVALUATOR_MAX_WAIT_S,
+        cpu_tail_fraction=CPU_TAIL_FRACTION,
     )
     self_play_pool.open()
 
+    existing_checkpoint_paths = sorted_iteration_checkpoint_paths(CHECKPOINT_DIR)
+    start_iteration = 0
+    saved_checkpoint_paths = list(existing_checkpoint_paths)
+
+    if resume and existing_checkpoint_paths:
+        latest_checkpoint_path = existing_checkpoint_paths[-1]
+        latest_checkpoint = torch.load(latest_checkpoint_path, map_location=device)
+        model.load_state_dict(latest_checkpoint["model_state_dict"])
+        start_iteration = checkpoint_iteration_from_path(latest_checkpoint_path) + 1
+
     total_train_steps = NUM_ITERATIONS * TRAIN_STEPS_PER_ITERATION
-    global_train_step = 0
+    global_train_step = start_iteration * TRAIN_STEPS_PER_ITERATION
     current_lr = LEARNING_RATE
-    saved_checkpoint_paths = []
 
     current_lr = learning_rate_at_step(
         step=global_train_step,
@@ -182,6 +207,14 @@ def train(
     print(f"- Evaluator max batch size: {EVALUATOR_MAX_BATCH_SIZE:,}")
     print(f"- Evaluation workers: {EVALUATION_WORKERS:,}")
     print(f"- Total iterations: {NUM_ITERATIONS:,}")
+    if resume:
+        if existing_checkpoint_paths:
+            print(
+                "- Resume: "
+                f"loaded {existing_checkpoint_paths[-1].name} and continuing from iteration {start_iteration:,}."
+            )
+        else:
+            print("- Resume: no checkpoint found, starting from scratch.")
     print(
         "- LR schedule: "
         f"linear warmup over {WARMUP_FRACTION:.0%}, then cosine decay from {format_learning_rate(LEARNING_RATE)} "
@@ -189,8 +222,39 @@ def train(
     )
     print()
 
+    if start_iteration >= NUM_ITERATIONS:
+        print("Training target already reached; nothing to do.")
+        self_play_pool.close()
+        writer.close()
+        return
+
+    if resume and existing_checkpoint_paths:
+        model.eval()
+        with tqdm(
+            total=REPLAY_BUFFER_SIZE,
+            desc="Replay fill",
+            position=0,
+        ) as replay_fill_bar:
+            replay_fill_bar.update(len(replay_buffer))
+            fill_round = 0
+            while len(replay_buffer) < REPLAY_BUFFER_SIZE:
+                previous_buffer_size = len(replay_buffer)
+                replay_buffer.push_examples(
+                    self_play_pool.generate_examples(
+                        model=model,
+                        total_games=GAMES_PER_ITERATION,
+                        num_sampling_moves=NUM_SAMPLING_MOVES,
+                        iteration=start_iteration + fill_round,
+                        desc="Replay fill self-play",
+                        position=1,
+                        leave=False,
+                    )
+                )
+                replay_fill_bar.update(len(replay_buffer) - previous_buffer_size)
+                fill_round += 1
+
     iteration_bar = tqdm(
-        range(NUM_ITERATIONS),
+        range(start_iteration, NUM_ITERATIONS),
         desc="Iterations",
         position=0,
     )
@@ -358,18 +422,21 @@ def train(
 
 
 if __name__ == "__main__":
+    NUM_ITERATIONS = 1_000
+    NUM_WORKERS = 8
+
     parser = argparse.ArgumentParser(description="Train the Score Four Zero model.")
     parser.add_argument(
         "--num-iterations",
         type=int,
-        default=30_000,
-        help="Number of training iterations to run. Default: 30000.",
+        default=NUM_ITERATIONS,
+        help=f"Number of training iterations to run. Default: {NUM_ITERATIONS:,}.",
     )
     parser.add_argument(
         "--workers",
         type=int,
-        default=8,
-        help="Number of CPU self-play workers to use. Also used as the evaluation worker cap. Default: 8.",
+        default=NUM_WORKERS,
+        help=f"Number of CPU self-play workers to use. Also used as the evaluation worker cap. Default: {NUM_WORKERS}.",
     )
     parser.add_argument(
         "--delete-existing-checkpoints",
@@ -381,10 +448,16 @@ if __name__ == "__main__":
         action="store_true",
         help="Skip checkpoint-vs-checkpoint evaluation during training. Default: disabled.",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume from the latest iteration_*.pt checkpoint, refill the replay buffer with that model, and continue training.",
+    )
     args = parser.parse_args()
     train(
         delete_existing_checkpoints=args.delete_existing_checkpoints,
         num_iterations=args.num_iterations,
         workers=args.workers,
         skip_evaluation=args.skip_evaluation,
+        resume=args.resume,
     )
