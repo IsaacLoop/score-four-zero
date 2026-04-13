@@ -48,6 +48,7 @@ MIN_TEMPORAL_AVG_WINDOW = 5
 MAX_TEMPORAL_AVG_WINDOW = 10_000
 DEFAULT_TEMPORAL_AVG_WINDOW = 20
 UNDEREXPLORED_FIRST_PICK_BONUS = 2.0
+MAX_SNAPSHOT_HISTORY = 10_000
 
 
 def build_temporal_avg_window_options():
@@ -903,6 +904,8 @@ class LiveCheckpointRanker:
                         }
                     }
                 )
+                if len(self.snapshot_history) > MAX_SNAPSHOT_HISTORY:
+                    del self.snapshot_history[:-MAX_SNAPSHOT_HISTORY]
                 while self._next_snapshot_match_count <= self.total_matches:
                     self._next_snapshot_match_count += self.snapshot_interval_matches
                 self._next_snapshot_time = now + self.snapshot_min_interval_s

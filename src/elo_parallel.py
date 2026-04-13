@@ -2,6 +2,8 @@
 Entirely vibe-coded file (gpt-5.4 xhigh reasoning).
 """
 
+from collections import OrderedDict
+from concurrent.futures.process import BrokenProcessPool
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from multiprocessing import get_context
 from pathlib import Path
@@ -19,7 +21,32 @@ _WORKER_EVAL_CACHE = {}
 _WORKER_NUM_SIMULATIONS = None
 _WORKER_C_PUCT = None
 _WORKER_TEMPERATURE = None
+_WORKER_EVAL_CACHE_MAX_ENTRIES_PER_MODEL = 20_000
 _LEGACY_ANCHOR_DIR = (Path(__file__).resolve().parent.parent / "anchors" / "legacy_pv_model").resolve()
+
+
+class FightPoolError(RuntimeError):
+    pass
+
+
+class _BoundedEvalCache(OrderedDict):
+
+    def __init__(self, max_entries: int):
+        super().__init__()
+        self.max_entries = max(1, int(max_entries))
+
+    def get(self, key, default=None):
+        if key in self:
+            self.move_to_end(key)
+            return super().get(key)
+        return default
+
+    def __setitem__(self, key, value):
+        if key in self:
+            self.move_to_end(key)
+        super().__setitem__(key, value)
+        while len(self) > self.max_entries:
+            self.popitem(last=False)
 
 
 def _init_fight_worker(num_simulations: int, c_puct: float, temperature: float):
@@ -56,6 +83,15 @@ def _get_cached_model(model_path: str):
 def _fight_worker(model_path_1: str, model_path_2: str):
     model1 = _get_cached_model(model_path_1)
     model2 = _get_cached_model(model_path_2)
+
+    _WORKER_EVAL_CACHE.setdefault(
+        model_path_1,
+        _BoundedEvalCache(_WORKER_EVAL_CACHE_MAX_ENTRIES_PER_MODEL),
+    )
+    _WORKER_EVAL_CACHE.setdefault(
+        model_path_2,
+        _BoundedEvalCache(_WORKER_EVAL_CACHE_MAX_ENTRIES_PER_MODEL),
+    )
 
     env = Env()
     mcts1 = MCTS(
@@ -166,14 +202,72 @@ def parallel_fight_results(
     temperature: float = 0.0,
     desc: str = "Fights",
 ):
-    with ParallelFightPool(
-        model_paths=model_paths,
+    path_matchups = [
+        (str(model_paths[idx1]), str(model_paths[idx2])) for idx1, idx2 in matchups
+    ]
+    return parallel_fight_path_results(
+        path_matchups=path_matchups,
         num_simulations=num_simulations,
         max_workers=max_workers,
         c_puct=c_puct,
         temperature=temperature,
-    ) as fight_pool:
-        return fight_pool.fight_results(matchups, desc=desc)
+        desc=desc,
+    )
+
+
+def _worker_fallback_counts(max_workers: int, fallback_worker_limits=(8, 4, 1)):
+    worker_counts = []
+
+    normalized_max_workers = max(1, int(max_workers))
+    worker_counts.append(normalized_max_workers)
+
+    for fallback_limit in fallback_worker_limits:
+        normalized_worker_count = max(1, min(normalized_max_workers, int(fallback_limit)))
+        if normalized_worker_count not in worker_counts:
+            worker_counts.append(normalized_worker_count)
+
+    return worker_counts
+
+
+def parallel_fight_path_results(
+    path_matchups,
+    num_simulations: int,
+    max_workers: int,
+    c_puct: float = 1.5,
+    temperature: float = 0.0,
+    desc: str | None = "Fights",
+    position: int | None = None,
+    leave: bool = False,
+    max_tasks_per_child: int | None = None,
+    task_batch_size: int = 1,
+    retry_desc: str = "Fight pool",
+):
+    worker_counts = _worker_fallback_counts(max_workers)
+    last_exception = None
+
+    for worker_count in worker_counts:
+        try:
+            with ParallelFightPool(
+                model_paths=(),
+                num_simulations=num_simulations,
+                max_workers=worker_count,
+                c_puct=c_puct,
+                temperature=temperature,
+                max_tasks_per_child=max_tasks_per_child,
+                task_batch_size=task_batch_size,
+            ) as fight_pool:
+                return fight_pool.fight_path_results(
+                    path_matchups,
+                    desc=desc,
+                    position=position,
+                    leave=leave,
+                )
+        except (BrokenProcessPool, OSError, PermissionError, SystemError) as exc:
+            last_exception = exc
+
+    raise FightPoolError(
+        f"{retry_desc} failed after retrying with fewer workers."
+    ) from last_exception
 
 
 class ParallelFightPool:

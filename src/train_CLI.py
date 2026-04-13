@@ -2,7 +2,6 @@ import argparse
 import math
 import os
 import shutil
-from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 
 import torch
@@ -12,7 +11,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from .ReplayBuffer import ReplayBuffer
-from .elo_parallel import ParallelFightPool, remap_fight_result
+from .elo_parallel import FightPoolError, parallel_fight_path_results, remap_fight_result
 from .models import PVModel
 from .self_play_parallel import ParallelSelfPlayPool
 
@@ -83,46 +82,16 @@ def previous_checkpoint_winrate(
                 )
             )
 
-    worker_candidates = []
-    for worker_count in (
-        max_workers,
-        min(max_workers, 8),
-        min(max_workers, 4),
-        1,
-    ):
-        normalized_worker_count = max(1, int(worker_count))
-        if normalized_worker_count not in worker_candidates:
-            worker_candidates.append(normalized_worker_count)
-
-    last_exception = None
-    results = None
-    for worker_count in worker_candidates:
-        try:
-            with ParallelFightPool(
-                model_paths=(),
-                num_simulations=num_simulations,
-                max_workers=worker_count,
-                c_puct=c_puct,
-            ) as fight_pool:
-                results = fight_pool.fight_path_results(
-                    path_matchups,
-                    desc="Evaluation",
-                    position=3,
-                    leave=False,
-                )
-            break
-        except (BrokenProcessPool, OSError, PermissionError) as exc:
-            last_exception = exc
-            if worker_count != worker_candidates[-1]:
-                print(
-                    "Evaluation pool failed with "
-                    f"{worker_count} workers ({type(exc).__name__}: {exc}). Retrying with fewer workers..."
-                )
-
-    if results is None:
-        raise RuntimeError(
-            "Evaluation failed after retrying with fewer workers."
-        ) from last_exception
+    results = parallel_fight_path_results(
+        path_matchups=path_matchups,
+        num_simulations=num_simulations,
+        max_workers=max_workers,
+        c_puct=c_puct,
+        desc="Evaluation",
+        position=3,
+        leave=False,
+        retry_desc="Evaluation pool",
+    )
 
     score = 0.0
     for result, swapped in zip(results, swapped_flags):
@@ -424,10 +393,7 @@ def train(
                             max_workers=EVALUATION_WORKERS,
                             c_puct=C_PUCT,
                         )
-                    except RuntimeError as exc:
-                        print(
-                            f"Skipping evaluation gap {evaluation_checkpoint_gap} because the fight pool failed: {exc}"
-                        )
+                    except FightPoolError:
                         continue
 
                     checkpoint_winrates[f"gap_{evaluation_checkpoint_gap}"] = float(
