@@ -489,7 +489,6 @@ class LiveCheckpointRanker:
                         fight_pool.close()
 
                     fight_pool = ParallelFightPool(
-                        model_paths=(),
                         num_simulations=self.num_simulations,
                         max_workers=desired_workers,
                         c_puct=self.c_puct,

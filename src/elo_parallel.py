@@ -193,28 +193,6 @@ def sample_matchup(
     return idx1, idx2
 
 
-def parallel_fight_results(
-    model_paths,
-    matchups,
-    num_simulations: int,
-    max_workers: int = 24,
-    c_puct: float = 1.5,
-    temperature: float = 0.0,
-    desc: str = "Fights",
-):
-    path_matchups = [
-        (str(model_paths[idx1]), str(model_paths[idx2])) for idx1, idx2 in matchups
-    ]
-    return parallel_fight_path_results(
-        path_matchups=path_matchups,
-        num_simulations=num_simulations,
-        max_workers=max_workers,
-        c_puct=c_puct,
-        temperature=temperature,
-        desc=desc,
-    )
-
-
 def _worker_fallback_counts(max_workers: int, fallback_worker_limits=(8, 4, 1)):
     worker_counts = []
 
@@ -248,7 +226,6 @@ def parallel_fight_path_results(
     for worker_count in worker_counts:
         try:
             with ParallelFightPool(
-                model_paths=(),
                 num_simulations=num_simulations,
                 max_workers=worker_count,
                 c_puct=c_puct,
@@ -274,7 +251,6 @@ class ParallelFightPool:
 
     def __init__(
         self,
-        model_paths,
         num_simulations: int,
         max_workers: int = 24,
         c_puct: float = 1.5,
@@ -282,7 +258,6 @@ class ParallelFightPool:
         max_tasks_per_child: int | None = None,
         task_batch_size: int = 1,
     ):
-        self.model_paths = tuple(str(path) for path in model_paths)
         self.num_simulations = num_simulations
         self.max_workers = max_workers
         self.c_puct = c_puct
@@ -357,30 +332,12 @@ class ParallelFightPool:
 
         return completed_path_results
 
-    def fight_results(
-        self,
-        matchups,
-        desc: str | None = "Fights",
-        position: int | None = None,
-        leave: bool = False,
-    ):
-        path_matchups = [
-            (self.model_paths[idx1], self.model_paths[idx2]) for idx1, idx2 in matchups
-        ]
-        return self.fight_path_results(
-            path_matchups,
-            desc=desc,
-            position=position,
-            leave=leave,
-        )
-
     def iter_fight_path_results(
         self,
         path_matchups,
         desc: str | None = "Fights",
         position: int | None = None,
         leave: bool = False,
-        include_cache_status: bool = False,
     ):
         if self.executor is None:
             raise RuntimeError("ParallelFightPool must be opened before use.")
@@ -417,10 +374,7 @@ class ParallelFightPool:
             for matchup_index, cached_result in cached_results:
                 if progress_bar is not None:
                     progress_bar.update(1)
-                if include_cache_status:
-                    yield matchup_index, cached_result, True
-                else:
-                    yield matchup_index, cached_result
+                yield matchup_index, cached_result
 
             next_chunk_to_submit = 0
 
@@ -447,10 +401,7 @@ class ParallelFightPool:
                             self.result_cache[path_matchup] = result
                         if progress_bar is not None:
                             progress_bar.update(1)
-                        if include_cache_status:
-                            yield matchup_index, result, False
-                        else:
-                            yield matchup_index, result
+                        yield matchup_index, result
 
                     if next_chunk_to_submit < len(uncached_chunks):
                         next_chunk = uncached_chunks[next_chunk_to_submit]
@@ -484,105 +435,3 @@ class ParallelFightPool:
             results[matchup_index] = result
 
         return results
-
-
-class ParallelEloPool:
-
-    def __init__(
-        self,
-        num_simulations: int,
-        max_workers: int = 24,
-        c_puct: float = 1.5,
-        temperature: float = 0.0,
-        elo_k: float = 20.0,
-        matchmaking_distance_scale: float = 200.0,
-        matchmaking_min_weight: float = 0.05,
-        max_tasks_per_child: int | None = None,
-    ):
-        self.max_workers = max_workers
-        self.elo_k = elo_k
-        self.matchmaking_distance_scale = matchmaking_distance_scale
-        self.matchmaking_min_weight = matchmaking_min_weight
-        self.fight_pool = ParallelFightPool(
-            model_paths=(),
-            num_simulations=num_simulations,
-            max_workers=max_workers,
-            c_puct=c_puct,
-            temperature=temperature,
-            max_tasks_per_child=max_tasks_per_child,
-        )
-
-    def open(self):
-        self.fight_pool.open()
-        return self
-
-    def close(self):
-        self.fight_pool.close()
-
-    def __enter__(self):
-        return self.open()
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        self.close()
-
-    def evaluate(
-        self,
-        elos,
-        model_paths,
-        num_fights: int,
-        always_last: bool = False,
-        desc: str = "Evaluation",
-        position: int = 3,
-        leave: bool = False,
-    ):
-        if len(model_paths) < 2 or num_fights <= 0:
-            return list(elos)
-
-        updated_elos = list(elos)
-        model_paths = [str(path) for path in model_paths]
-        fights_remaining = num_fights
-
-        with tqdm(
-            total=num_fights,
-            desc=desc,
-            position=position,
-            leave=leave,
-        ) as evaluation_bar:
-            while fights_remaining > 0:
-                batch_size = min(self.max_workers, fights_remaining)
-                matchup_indices = []
-                swapped_flags = []
-
-                for _ in range(batch_size):
-                    idx1, idx2 = sample_matchup(
-                        updated_elos,
-                        distance_scale=self.matchmaking_distance_scale,
-                        min_weight=self.matchmaking_min_weight,
-                        forced_idx1=(len(updated_elos) - 1) if always_last else None,
-                    )
-                    matchup_indices.append((idx1, idx2))
-                    swapped_flags.append(bool(always_last and np.random.rand() < 0.5))
-
-                path_matchups = []
-                for (idx1, idx2), swapped in zip(matchup_indices, swapped_flags):
-                    if swapped:
-                        path_matchups.append((model_paths[idx2], model_paths[idx1]))
-                    else:
-                        path_matchups.append((model_paths[idx1], model_paths[idx2]))
-                results = self.fight_pool.fight_path_results(path_matchups, desc=None)
-
-                for (idx1, idx2), swapped, result in zip(
-                    matchup_indices, swapped_flags, results
-                ):
-                    remapped_result = remap_fight_result(result, swapped)
-                    updated_elos[idx1], updated_elos[idx2] = compute_new_elos(
-                        updated_elos[idx1],
-                        updated_elos[idx2],
-                        remapped_result,
-                        k=self.elo_k,
-                    )
-
-                fights_remaining -= batch_size
-                evaluation_bar.update(batch_size)
-
-        return updated_elos
