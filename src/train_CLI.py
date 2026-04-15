@@ -11,7 +11,11 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from .ReplayBuffer import ReplayBuffer
-from .elo_parallel import FightPoolError, parallel_fight_path_results, remap_fight_result
+from .elo_parallel import (
+    FightPoolError,
+    parallel_fight_path_results,
+    remap_fight_result,
+)
 from .models import PVModel
 from .self_play_parallel import ParallelSelfPlayPool
 
@@ -141,7 +145,9 @@ def train(
 
     CHECKPOINT_DIR.mkdir(exist_ok=True)
     if resume and delete_existing_checkpoints:
-        raise ValueError("--resume and --delete-existing-checkpoints cannot be used together.")
+        raise ValueError(
+            "--resume and --delete-existing-checkpoints cannot be used together."
+        )
     if delete_existing_checkpoints:
         for checkpoint_path in CHECKPOINT_DIR.glob("iteration_*.pt"):
             checkpoint_path.unlink()
@@ -157,6 +163,7 @@ def train(
         model.parameters(),
         lr=LEARNING_RATE,
         weight_decay=WEIGHT_DECAY,
+        fused=device.type == "cuda",
     )
     replay_buffer = ReplayBuffer(capacity=REPLAY_BUFFER_SIZE)
     writer = SummaryWriter(TENSORBOARD_DIR)
