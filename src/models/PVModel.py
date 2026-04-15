@@ -10,36 +10,30 @@ class PVModel(AbstractPVModel):
         super().__init__()
 
         self.backbone = torch.nn.Sequential(
-            torch.nn.Conv3d(in_channels=2, out_channels=16, kernel_size=3, padding=1),
-            torch.nn.BatchNorm3d(16),
-            torch.nn.ReLU(),
-            torch.nn.Conv3d(in_channels=16, out_channels=24, kernel_size=3, padding=1),
+            torch.nn.Conv3d(in_channels=2, out_channels=24, kernel_size=3, padding=1),
             torch.nn.BatchNorm3d(24),
             torch.nn.ReLU(),
-            torch.nn.Conv3d(in_channels=24, out_channels=32, kernel_size=3, padding=1),
-            torch.nn.BatchNorm3d(32),
-            torch.nn.ReLU(),
-            torch.nn.Conv3d(in_channels=32, out_channels=48, kernel_size=3, padding=1),
+
+            torch.nn.Conv3d(in_channels=24, out_channels=48, kernel_size=3, padding=1),
             torch.nn.BatchNorm3d(48),
             torch.nn.ReLU(),
-            torch.nn.Conv3d(in_channels=48, out_channels=64, kernel_size=3, padding=1),
-            torch.nn.BatchNorm3d(64),
-            torch.nn.ReLU(),
-            torch.nn.Conv3d(in_channels=64, out_channels=96, kernel_size=3, padding=1),
+
+            torch.nn.Conv3d(in_channels=48, out_channels=96, kernel_size=3, padding=1),
             torch.nn.BatchNorm3d(96),
             torch.nn.ReLU(),
+            
             torch.nn.Flatten(),
-            torch.nn.Linear(96 * BOARD_SIZE**3, 592),
-            torch.nn.BatchNorm1d(592),
+            torch.nn.Linear(96 * BOARD_SIZE**3, 384),
+            torch.nn.BatchNorm1d(384),
             torch.nn.ReLU(),
         )
         self.policy_head = torch.nn.Sequential(
-            torch.nn.Linear(592, 64),
+            torch.nn.Linear(384, 64),
             torch.nn.ReLU(),
             torch.nn.Linear(64, BOARD_SIZE**2),
         )
         self.value_head = torch.nn.Sequential(
-            torch.nn.Linear(592, 64),
+            torch.nn.Linear(384, 64),
             torch.nn.BatchNorm1d(64),
             torch.nn.ReLU(),
             torch.nn.Linear(64, 1),

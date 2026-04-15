@@ -25,12 +25,12 @@ def learning_rate_at_step(
     total_steps: int,
     peak_lr: float,
     final_lr: float,
-    warmup_fraction: float = 0.0,
+    warmup_steps: int = 0,
 ):
     if total_steps <= 1:
         return peak_lr
 
-    warmup_steps = max(0, min(total_steps - 1, int(total_steps * warmup_fraction)))
+    warmup_steps = max(0, min(total_steps - 1, int(warmup_steps)))
     if warmup_steps > 0 and step < warmup_steps:
         return peak_lr * ((step + 1) / warmup_steps)
 
@@ -51,6 +51,10 @@ def checkpoint_iteration_from_path(checkpoint_path: Path) -> int:
     return int(checkpoint_path.stem.split("_")[-1])
 
 
+def optimizer_checkpoint_path(checkpoint_dir: Path, iteration: int) -> Path:
+    return checkpoint_dir / f"optimizer_{iteration}.pt"
+
+
 def sorted_iteration_checkpoint_paths(checkpoint_dir: Path):
     return sorted(
         checkpoint_dir.glob("iteration_*.pt"),
@@ -64,11 +68,13 @@ def previous_checkpoint_winrate(
     num_simulations: int,
     max_workers: int,
     c_puct: float,
+    temperature: float,
+    num_matches: int,
 ) -> float:
     path_matchups = []
     swapped_flags = []
 
-    for fight_index in (0, 1):
+    for fight_index in range(num_matches):
         swapped = fight_index % 2 == 1
         swapped_flags.append(swapped)
         if swapped:
@@ -91,6 +97,7 @@ def previous_checkpoint_winrate(
         num_simulations=num_simulations,
         max_workers=max_workers,
         c_puct=c_puct,
+        temperature=temperature,
         desc="Evaluation",
         position=3,
         leave=False,
@@ -105,7 +112,7 @@ def previous_checkpoint_winrate(
         elif remapped_result == 0:
             score += 0.5
 
-    return score / 2.0
+    return score / num_matches
 
 
 def train(
@@ -116,10 +123,10 @@ def train(
     resume: bool = False,
 ):
     NUM_ITERATIONS = num_iterations
-    GAMES_PER_ITERATION = 512
-    TRAIN_STEPS_PER_ITERATION = 2048
-    BATCH_SIZE = 512
-    REPLAY_BUFFER_SIZE = 1_000_000
+    GAMES_PER_ITERATION = 768
+    TRAIN_STEPS_PER_ITERATION = 768
+    BATCH_SIZE = 1_536
+    REPLAY_BUFFER_SIZE = 1_500_000
 
     NUM_SIMULATIONS_TRAINING = 100
     C_PUCT = 1.5
@@ -127,9 +134,12 @@ def train(
     DIRICHLET_EPSILON = 0.25
     LEARNING_RATE = 5e-4
     FINAL_LEARNING_RATE = 0.0
-    WARMUP_FRACTION = 0.01
+    WARMUP_ITERATIONS = 10
     CHECKPOINT_EVERY_ITERATIONS = 1
-    EVAL_CHECKPOINT_GAPS = (2, 5, 10)
+    EVAL_EVERY_ITERATIONS = 10
+    EVAL_CHECKPOINT_GAP = 10
+    EVAL_NUM_MATCHES = 10
+    EVAL_TEMPERATURE = 0.5
     WEIGHT_DECAY = 1e-4
     MAX_GRAD_NORM = 1.0
     NUM_SAMPLING_MOVES = 8
@@ -137,7 +147,7 @@ def train(
     LIVE_GAMES_PER_WORKER = 64
     EVALUATOR_MAX_BATCH_SIZE = 1024
     EVALUATOR_MAX_WAIT_S = 0.001
-    CPU_TAIL_FRACTION = 0.02
+    CPU_TAIL_FRACTION = 0.0
     EVALUATION_WORKERS = min(8, workers, os.cpu_count() or 1)
     TENSORBOARD_DIR = Path("tb_logs")
 
@@ -151,6 +161,8 @@ def train(
     if delete_existing_checkpoints:
         for checkpoint_path in CHECKPOINT_DIR.glob("iteration_*.pt"):
             checkpoint_path.unlink()
+        for optimizer_path in CHECKPOINT_DIR.glob("optimizer_*.pt"):
+            optimizer_path.unlink()
     if TENSORBOARD_DIR.exists() and not resume:
         shutil.rmtree(TENSORBOARD_DIR)
 
@@ -183,12 +195,25 @@ def train(
     existing_checkpoint_paths = sorted_iteration_checkpoint_paths(CHECKPOINT_DIR)
     start_iteration = 0
     saved_checkpoint_paths = list(existing_checkpoint_paths)
-
+    latest_checkpoint_path = None
+    latest_optimizer_path = None
     if resume and existing_checkpoint_paths:
         latest_checkpoint_path = existing_checkpoint_paths[-1]
+        latest_iteration = checkpoint_iteration_from_path(latest_checkpoint_path)
+        latest_optimizer_path = optimizer_checkpoint_path(
+            CHECKPOINT_DIR,
+            latest_iteration,
+        )
+        if not latest_optimizer_path.exists():
+            raise FileNotFoundError(
+                "Cannot resume training without the matching optimizer checkpoint: "
+                f"{latest_optimizer_path}"
+            )
         latest_checkpoint = torch.load(latest_checkpoint_path, map_location=device)
+        latest_optimizer = torch.load(latest_optimizer_path, map_location=device)
         model.load_state_dict(latest_checkpoint["model_state_dict"])
-        start_iteration = checkpoint_iteration_from_path(latest_checkpoint_path) + 1
+        optimizer.load_state_dict(latest_optimizer["optimizer_state_dict"])
+        start_iteration = latest_iteration + 1
 
     total_train_steps = NUM_ITERATIONS * TRAIN_STEPS_PER_ITERATION
     global_train_step = start_iteration * TRAIN_STEPS_PER_ITERATION
@@ -199,7 +224,7 @@ def train(
         total_steps=total_train_steps,
         peak_lr=LEARNING_RATE,
         final_lr=FINAL_LEARNING_RATE,
-        warmup_fraction=WARMUP_FRACTION,
+        warmup_steps=WARMUP_ITERATIONS * TRAIN_STEPS_PER_ITERATION,
     )
     for param_group in optimizer.param_groups:
         param_group["lr"] = current_lr
@@ -211,18 +236,20 @@ def train(
     print(f"- Live games per worker: {LIVE_GAMES_PER_WORKER:,}")
     print(f"- Evaluator max batch size: {EVALUATOR_MAX_BATCH_SIZE:,}")
     print(f"- Evaluation workers: {EVALUATION_WORKERS:,}")
+
     print(f"- Total iterations: {NUM_ITERATIONS:,}")
     if resume:
-        if existing_checkpoint_paths:
+        if latest_checkpoint_path is not None and latest_optimizer_path is not None:
             print(
                 "- Resume: "
-                f"loaded {existing_checkpoint_paths[-1].name} and continuing from iteration {start_iteration:,}."
+                f"loaded {latest_checkpoint_path.name} and {latest_optimizer_path.name}, "
+                f"continuing from iteration {start_iteration:,}."
             )
         else:
             print("- Resume: no checkpoint found, starting from scratch.")
     print(
         "- LR schedule: "
-        f"linear warmup over {WARMUP_FRACTION:.0%}, then cosine decay from {format_learning_rate(LEARNING_RATE)} "
+        f"linear warmup over about {WARMUP_ITERATIONS:,} iterations ({(WARMUP_ITERATIONS / max(1, NUM_ITERATIONS)):.2%}), then cosine decay from {format_learning_rate(LEARNING_RATE)} "
         f"to {format_learning_rate(FINAL_LEARNING_RATE)}."
     )
     print()
@@ -318,7 +345,7 @@ def train(
                 total_steps=total_train_steps,
                 peak_lr=LEARNING_RATE,
                 final_lr=FINAL_LEARNING_RATE,
-                warmup_fraction=WARMUP_FRACTION,
+                warmup_steps=WARMUP_ITERATIONS * TRAIN_STEPS_PER_ITERATION,
             )
             iteration_bar.set_postfix({"lr": f"{current_lr:.4e}"})
             for param_group in optimizer.param_groups:
@@ -377,6 +404,7 @@ def train(
         # Saving checkpoints
         if iteration % CHECKPOINT_EVERY_ITERATIONS == 0:
             checkpoint_path = CHECKPOINT_DIR / f"iteration_{iteration}.pt"
+            optimizer_path = optimizer_checkpoint_path(CHECKPOINT_DIR, iteration)
             torch.save(
                 {
                     "iteration": iteration + 1,
@@ -384,33 +412,37 @@ def train(
                 },
                 checkpoint_path,
             )
+            torch.save(
+                {
+                    "iteration": iteration + 1,
+                    "optimizer_state_dict": optimizer.state_dict(),
+                },
+                optimizer_path,
+            )
 
             # Evaluating
-            if not skip_evaluation:
-                checkpoint_winrates = {}
-                for evaluation_checkpoint_gap in EVAL_CHECKPOINT_GAPS:
-                    if len(saved_checkpoint_paths) < evaluation_checkpoint_gap:
-                        continue
-
-                    try:
-                        winrate = previous_checkpoint_winrate(
-                            saved_checkpoint_paths[-evaluation_checkpoint_gap],
-                            checkpoint_path,
-                            num_simulations=NUM_SIMULATIONS_TRAINING,
-                            max_workers=EVALUATION_WORKERS,
-                            c_puct=C_PUCT,
-                        )
-                    except FightPoolError:
-                        continue
-
-                    checkpoint_winrates[f"gap_{evaluation_checkpoint_gap}"] = float(
-                        winrate
+            should_evaluate = (
+                not skip_evaluation
+                and iteration % EVAL_EVERY_ITERATIONS == 0
+                and len(saved_checkpoint_paths) >= EVAL_CHECKPOINT_GAP
+            )
+            if should_evaluate:
+                try:
+                    winrate = previous_checkpoint_winrate(
+                        saved_checkpoint_paths[-EVAL_CHECKPOINT_GAP],
+                        checkpoint_path,
+                        num_simulations=NUM_SIMULATIONS_TRAINING,
+                        max_workers=EVALUATION_WORKERS,
+                        c_puct=C_PUCT,
+                        temperature=EVAL_TEMPERATURE,
+                        num_matches=EVAL_NUM_MATCHES,
                     )
-
-                if checkpoint_winrates:
-                    writer.add_scalars(
-                        "e/checkpoint_winrate",
-                        checkpoint_winrates,
+                except FightPoolError:
+                    pass
+                else:
+                    writer.add_scalar(
+                        f"e/checkpoint_winrate_gap_{EVAL_CHECKPOINT_GAP}",
+                        float(winrate),
                         iteration,
                     )
 
@@ -418,6 +450,9 @@ def train(
 
     final_checkpoint_step = NUM_ITERATIONS
     final_checkpoint_path = CHECKPOINT_DIR / f"iteration_{final_checkpoint_step}.pt"
+    final_optimizer_path = optimizer_checkpoint_path(
+        CHECKPOINT_DIR, final_checkpoint_step
+    )
     torch.save(
         {
             "iteration": NUM_ITERATIONS,
@@ -425,13 +460,20 @@ def train(
         },
         final_checkpoint_path,
     )
+    torch.save(
+        {
+            "iteration": NUM_ITERATIONS,
+            "optimizer_state_dict": optimizer.state_dict(),
+        },
+        final_optimizer_path,
+    )
 
     self_play_pool.close()
     writer.close()
 
 
 if __name__ == "__main__":
-    NUM_ITERATIONS = 1_000
+    NUM_ITERATIONS = 10_000
     NUM_WORKERS = 8
 
     parser = argparse.ArgumentParser(description="Train the Score Four Zero model.")
@@ -460,7 +502,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--resume",
         action="store_true",
-        help="Resume from the latest iteration_*.pt checkpoint, refill the replay buffer with that model, and continue training.",
+        help="Resume from the latest iteration_*.pt checkpoint and matching optimizer_*.pt checkpoint, refill the replay buffer with that model, and continue training.",
     )
     args = parser.parse_args()
     train(
