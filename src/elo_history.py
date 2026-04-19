@@ -18,7 +18,10 @@ def build_elo_snapshot(iteration: int, model_paths, elos):
     model_iterations = [checkpoint_iteration(path) for path in model_paths]
 
     if elos:
-        latest_index = len(elos) - 1
+        latest_index = max(
+            range(len(model_iterations)),
+            key=lambda idx: model_iterations[idx],
+        )
         best_index = max(range(len(elos)), key=lambda idx: elos[idx])
         latest_model_iteration = model_iterations[latest_index]
         latest_model_elo = float(elos[latest_index])

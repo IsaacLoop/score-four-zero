@@ -332,6 +332,7 @@ class LiveCheckpointRanker:
             while next_snapshot_match_count <= self.total_matches:
                 next_snapshot_match_count += self.snapshot_interval_matches
             self._next_snapshot_match_count = next_snapshot_match_count
+            self._sort_models_by_iteration_unlocked()
             self._refresh_metadata_unlocked()
 
         return True, "resumed previous checkpoint ranker state"
@@ -385,6 +386,30 @@ class LiveCheckpointRanker:
             "fight_counts": [int(count) for count in self.fight_counts],
             "snapshot_history": list(self.snapshot_history),
         }
+
+    def _sort_models_by_iteration_unlocked(self):
+        if len(self.model_paths) < 2:
+            return
+
+        sorted_indices = sorted(
+            range(len(self.model_paths)),
+            key=lambda model_index: checkpoint_iteration(self.model_paths[model_index]),
+        )
+        if sorted_indices == list(range(len(self.model_paths))):
+            return
+
+        self.model_paths = [self.model_paths[index] for index in sorted_indices]
+        self.elos = [self.elos[index] for index in sorted_indices]
+        self.fight_counts = [self.fight_counts[index] for index in sorted_indices]
+        for window in self.temporal_avg_windows:
+            self.temporal_avg_elos_by_window[window] = [
+                self.temporal_avg_elos_by_window[window][index]
+                for index in sorted_indices
+            ]
+            self.temporal_avg_warmup_counts_by_window[window] = [
+                self.temporal_avg_warmup_counts_by_window[window][index]
+                for index in sorted_indices
+            ]
 
     def _persist_resume_state(self):
         if not self.persist_resume_state:
@@ -741,6 +766,30 @@ class LiveCheckpointRanker:
     def _initial_elo_for_new_model_unlocked(self):
         return 500.0
 
+    def _model_insert_index_unlocked(self, checkpoint_path: str) -> int:
+        checkpoint_iteration_value = checkpoint_iteration(checkpoint_path)
+        for model_index, existing_model_path in enumerate(self.model_paths):
+            if checkpoint_iteration(existing_model_path) > checkpoint_iteration_value:
+                return model_index
+        return len(self.model_paths)
+
+    def _insert_model_unlocked(self, normalized_path: str, initial_elo: float):
+        insert_index = self._model_insert_index_unlocked(normalized_path)
+        self._known_model_paths.add(normalized_path)
+        self.model_paths.insert(insert_index, normalized_path)
+        self.elos.insert(insert_index, initial_elo)
+        self.fight_counts.insert(insert_index, 0)
+        for window in self.temporal_avg_windows:
+            self.temporal_avg_elos_by_window[window].insert(
+                insert_index,
+                float(initial_elo),
+            )
+            self.temporal_avg_warmup_counts_by_window[window].insert(
+                insert_index,
+                0,
+            )
+        return insert_index
+
     def _discover_new_models(self):
         new_models = []
         current_time = time.time()
@@ -761,13 +810,7 @@ class LiveCheckpointRanker:
                     continue
 
                 initial_elo = self._initial_elo_for_new_model_unlocked()
-                self._known_model_paths.add(normalized_path)
-                self.model_paths.append(normalized_path)
-                self.elos.append(initial_elo)
-                self.fight_counts.append(0)
-                for window in self.temporal_avg_windows:
-                    self.temporal_avg_elos_by_window[window].append(float(initial_elo))
-                    self.temporal_avg_warmup_counts_by_window[window].append(0)
+                self._insert_model_unlocked(normalized_path, initial_elo)
                 self.last_update_at = datetime.now(timezone.utc).isoformat()
                 self._refresh_snapshots_unlocked()
                 should_persist = True

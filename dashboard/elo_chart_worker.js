@@ -2,6 +2,8 @@
 
 let chartCanvas = null;
 let chartContext = null;
+const iterationGapBreakMultiplier = 8;
+const iterationGapBreakMinimum = 128;
 
 function makeTicks(minValue, maxValue, tickCount = 6) {
   if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) {
@@ -74,33 +76,101 @@ function computeMovingAverageValues(values, windowSize) {
   return averagedValues;
 }
 
-function drawPolylineFromArrays(ctx, xSeries, ySeries, xToCanvas, yToCanvas, strokeStyle, lineWidth, alpha = 1) {
+function computeSeriesSegments(xSeries, pointCount) {
+  if (pointCount <= 1) {
+    return pointCount ? [[0, pointCount]] : [];
+  }
+
+  const positiveGaps = [];
+  for (let pointIndex = 1; pointIndex < pointCount; pointIndex += 1) {
+    const previousX = Number(xSeries[pointIndex - 1]);
+    const currentX = Number(xSeries[pointIndex]);
+    const gap = currentX - previousX;
+    if (Number.isFinite(gap) && gap > 0) {
+      positiveGaps.push(gap);
+    }
+  }
+
+  if (!positiveGaps.length) {
+    return [[0, pointCount]];
+  }
+
+  positiveGaps.sort((leftGap, rightGap) => leftGap - rightGap);
+  const medianGap = positiveGaps[Math.floor(positiveGaps.length / 2)];
+  const breakThreshold = Math.max(
+    iterationGapBreakMinimum,
+    medianGap * iterationGapBreakMultiplier,
+  );
+  const segments = [];
+  let segmentStart = 0;
+
+  for (let pointIndex = 1; pointIndex < pointCount; pointIndex += 1) {
+    const previousX = Number(xSeries[pointIndex - 1]);
+    const currentX = Number(xSeries[pointIndex]);
+    const gap = currentX - previousX;
+    if (!Number.isFinite(gap) || gap > breakThreshold) {
+      segments.push([segmentStart, pointIndex]);
+      segmentStart = pointIndex;
+    }
+  }
+
+  segments.push([segmentStart, pointCount]);
+  return segments;
+}
+
+function drawPolylineFromArrays(
+  ctx,
+  xSeries,
+  ySeries,
+  xToCanvas,
+  yToCanvas,
+  strokeStyle,
+  lineWidth,
+  alpha = 1,
+  segments = null,
+) {
   const pointCount = Math.min(xSeries?.length ?? 0, ySeries?.length ?? 0);
   if (!pointCount) {
     return;
   }
 
+  const normalizedSegments = segments ?? computeSeriesSegments(xSeries, pointCount);
   ctx.save();
   ctx.strokeStyle = strokeStyle;
   ctx.lineWidth = lineWidth;
   ctx.lineJoin = "round";
   ctx.lineCap = "round";
   ctx.globalAlpha = alpha;
-  ctx.beginPath();
-  for (let pointIndex = 0; pointIndex < pointCount; pointIndex += 1) {
-    const x = xToCanvas(Number(xSeries[pointIndex]));
-    const y = yToCanvas(Number(ySeries[pointIndex]));
-    if (pointIndex === 0) {
-      ctx.moveTo(x, y);
-    } else {
-      ctx.lineTo(x, y);
+  for (const [segmentStart, segmentEnd] of normalizedSegments) {
+    if (segmentEnd - segmentStart < 2) {
+      continue;
     }
+    ctx.beginPath();
+    for (let pointIndex = segmentStart; pointIndex < segmentEnd; pointIndex += 1) {
+      const x = xToCanvas(Number(xSeries[pointIndex]));
+      const y = yToCanvas(Number(ySeries[pointIndex]));
+      if (pointIndex === segmentStart) {
+        ctx.moveTo(x, y);
+      } else {
+        ctx.lineTo(x, y);
+      }
+    }
+    ctx.stroke();
   }
-  ctx.stroke();
   ctx.restore();
 }
 
-function drawBandFromArrays(ctx, xSeries, lowerSeries, upperSeries, xToCanvas, yToCanvas, fillStyle, alpha = 1) {
+function drawBandFromArrays(
+  ctx,
+  xSeries,
+  lowerSeries,
+  upperSeries,
+  xToCanvas,
+  yToCanvas,
+  fillStyle,
+  alpha = 1,
+  segments = null,
+) {
   const seriesLength = Math.min(
     xSeries?.length ?? 0,
     lowerSeries?.length ?? 0,
@@ -110,26 +180,32 @@ function drawBandFromArrays(ctx, xSeries, lowerSeries, upperSeries, xToCanvas, y
     return;
   }
 
+  const normalizedSegments = segments ?? computeSeriesSegments(xSeries, seriesLength);
   ctx.save();
   ctx.fillStyle = fillStyle;
   ctx.globalAlpha = alpha;
-  ctx.beginPath();
-  for (let pointIndex = 0; pointIndex < seriesLength; pointIndex += 1) {
-    const x = xToCanvas(Number(xSeries[pointIndex]));
-    const y = yToCanvas(Number(upperSeries[pointIndex]));
-    if (pointIndex === 0) {
-      ctx.moveTo(x, y);
-    } else {
+  for (const [segmentStart, segmentEnd] of normalizedSegments) {
+    if (segmentEnd - segmentStart < 2) {
+      continue;
+    }
+    ctx.beginPath();
+    for (let pointIndex = segmentStart; pointIndex < segmentEnd; pointIndex += 1) {
+      const x = xToCanvas(Number(xSeries[pointIndex]));
+      const y = yToCanvas(Number(upperSeries[pointIndex]));
+      if (pointIndex === segmentStart) {
+        ctx.moveTo(x, y);
+      } else {
+        ctx.lineTo(x, y);
+      }
+    }
+    for (let pointIndex = segmentEnd - 1; pointIndex >= segmentStart; pointIndex -= 1) {
+      const x = xToCanvas(Number(xSeries[pointIndex]));
+      const y = yToCanvas(Number(lowerSeries[pointIndex]));
       ctx.lineTo(x, y);
     }
+    ctx.closePath();
+    ctx.fill();
   }
-  for (let pointIndex = seriesLength - 1; pointIndex >= 0; pointIndex -= 1) {
-    const x = xToCanvas(Number(xSeries[pointIndex]));
-    const y = yToCanvas(Number(lowerSeries[pointIndex]));
-    ctx.lineTo(x, y);
-  }
-  ctx.closePath();
-  ctx.fill();
   ctx.restore();
 }
 
@@ -266,6 +342,7 @@ function drawChart(payload) {
   const yTicks = makeTicks(chartMinY, chartMaxY, 14);
   const xToCanvas = (x) => padding.left + ((x - minX) / (maxX - minX)) * plotWidth;
   const yToCanvas = (y) => padding.top + (1 - (y - chartMinY) / (chartMaxY - chartMinY)) * plotHeight;
+  const lineSegments = computeSeriesSegments(modelIterations, pointCount);
 
   ctx.strokeStyle = themeColors.chartGrid;
   ctx.lineWidth = 1;
@@ -305,6 +382,7 @@ function drawChart(payload) {
       yToCanvas,
       themeColors.chartAverage,
       0.18,
+      lineSegments,
     );
     drawPolylineFromArrays(
       ctx,
@@ -315,6 +393,7 @@ function drawChart(payload) {
       themeColors.chartAverage,
       0.9,
       0.26,
+      lineSegments,
     );
     drawPolylineFromArrays(
       ctx,
@@ -325,6 +404,7 @@ function drawChart(payload) {
       themeColors.chartAverage,
       0.9,
       0.26,
+      lineSegments,
     );
     drawPolylineFromArrays(
       ctx,
@@ -335,6 +415,7 @@ function drawChart(payload) {
       themeColors.chartAverage,
       1,
       0.45,
+      lineSegments,
     );
     drawPolylineFromArrays(
       ctx,
@@ -345,6 +426,7 @@ function drawChart(payload) {
       themeColors.chartAverage,
       1,
       0.45,
+      lineSegments,
     );
   }
 
@@ -361,6 +443,7 @@ function drawChart(payload) {
         : themeColors.chartLine,
     minimalModeEnabled ? 1.7 : showMovingAverage ? 1.2 : 1.5,
     minimalModeEnabled ? 1 : showMovingAverage ? 0.32 : 1,
+    lineSegments,
   );
 
   if (showMovingAverage && !minimalModeEnabled) {
@@ -373,6 +456,7 @@ function drawChart(payload) {
       themeColors.chartAverage,
       2.6,
       1,
+      lineSegments,
     );
   }
 

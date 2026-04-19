@@ -848,6 +848,8 @@
     const smoothSmallChartPollIntervalMs = 120;
     const historyPollIntervalMs = 2000;
     const checkpointInteractionRadiusPx = 44;
+    const iterationGapBreakMultiplier = 8;
+    const iterationGapBreakMinimum = 128;
     const matchRateWindowMatches = 50;
     const denseLiveChartPointThreshold = 500;
     const denseLiveChartRefreshMs = 1000;
@@ -2922,6 +2924,49 @@
       };
     }
 
+    function computeIterationSegments(iterations) {
+      const pointCount = iterations?.length ?? 0;
+      if (pointCount <= 1) {
+        return pointCount ? [[0, pointCount]] : [];
+      }
+
+      const positiveGaps = [];
+      for (let pointIndex = 1; pointIndex < pointCount; pointIndex += 1) {
+        const previousIteration = Number(iterations[pointIndex - 1]);
+        const currentIteration = Number(iterations[pointIndex]);
+        const gap = currentIteration - previousIteration;
+        if (Number.isFinite(gap) && gap > 0) {
+          positiveGaps.push(gap);
+        }
+      }
+
+      if (!positiveGaps.length) {
+        return [[0, pointCount]];
+      }
+
+      positiveGaps.sort((leftGap, rightGap) => leftGap - rightGap);
+      const medianGap = positiveGaps[Math.floor(positiveGaps.length / 2)];
+      const breakThreshold = Math.max(
+        iterationGapBreakMinimum,
+        medianGap * iterationGapBreakMultiplier,
+      );
+      const segments = [];
+      let segmentStart = 0;
+
+      for (let pointIndex = 1; pointIndex < pointCount; pointIndex += 1) {
+        const previousIteration = Number(iterations[pointIndex - 1]);
+        const currentIteration = Number(iterations[pointIndex]);
+        const gap = currentIteration - previousIteration;
+        if (!Number.isFinite(gap) || gap > breakThreshold) {
+          segments.push([segmentStart, pointIndex]);
+          segmentStart = pointIndex;
+        }
+      }
+
+      segments.push([segmentStart, pointCount]);
+      return segments;
+    }
+
     function canAnimateMinimalModeTransition(previousFrame, nextFrame) {
       if (!previousFrame || !nextFrame) {
         return false;
@@ -2958,7 +3003,15 @@
       return projectedFrame;
     }
 
-    function drawMinimalModeFrame(ctx, width, height, layout, themeColors, projectedFrame) {
+    function drawMinimalModeFrame(
+      ctx,
+      width,
+      height,
+      layout,
+      themeColors,
+      projectedFrame,
+      segments,
+    ) {
       ctx.clearRect(0, 0, width, height);
       ctx.fillStyle = themeColors.chartBg;
       ctx.fillRect(0, 0, width, height);
@@ -2999,21 +3052,26 @@
         ctx.save();
         ctx.fillStyle = themeColors.chartAverage;
         ctx.globalAlpha = 0.18;
-        ctx.beginPath();
-        for (let pointIndex = 0; pointIndex < pointCount; pointIndex += 1) {
-          const x = projectedFrame.x[pointIndex];
-          const y = projectedFrame.upperY[pointIndex];
-          if (pointIndex === 0) {
-            ctx.moveTo(x, y);
-          } else {
-            ctx.lineTo(x, y);
+        for (const [segmentStart, segmentEnd] of segments) {
+          if (segmentEnd - segmentStart < 2) {
+            continue;
           }
+          ctx.beginPath();
+          for (let pointIndex = segmentStart; pointIndex < segmentEnd; pointIndex += 1) {
+            const x = projectedFrame.x[pointIndex];
+            const y = projectedFrame.upperY[pointIndex];
+            if (pointIndex === segmentStart) {
+              ctx.moveTo(x, y);
+            } else {
+              ctx.lineTo(x, y);
+            }
+          }
+          for (let pointIndex = segmentEnd - 1; pointIndex >= segmentStart; pointIndex -= 1) {
+            ctx.lineTo(projectedFrame.x[pointIndex], projectedFrame.lowerY[pointIndex]);
+          }
+          ctx.closePath();
+          ctx.fill();
         }
-        for (let pointIndex = pointCount - 1; pointIndex >= 0; pointIndex -= 1) {
-          ctx.lineTo(projectedFrame.x[pointIndex], projectedFrame.lowerY[pointIndex]);
-        }
-        ctx.closePath();
-        ctx.fill();
         ctx.restore();
 
         const drawSeries = (ySeries, lineWidth, alpha) => {
@@ -3023,17 +3081,22 @@
           ctx.lineJoin = "round";
           ctx.lineCap = "round";
           ctx.globalAlpha = alpha;
-          ctx.beginPath();
-          for (let pointIndex = 0; pointIndex < pointCount; pointIndex += 1) {
-            const x = projectedFrame.x[pointIndex];
-            const y = ySeries[pointIndex];
-            if (pointIndex === 0) {
-              ctx.moveTo(x, y);
-            } else {
-              ctx.lineTo(x, y);
+          for (const [segmentStart, segmentEnd] of segments) {
+            if (segmentEnd - segmentStart < 2) {
+              continue;
             }
+            ctx.beginPath();
+            for (let pointIndex = segmentStart; pointIndex < segmentEnd; pointIndex += 1) {
+              const x = projectedFrame.x[pointIndex];
+              const y = ySeries[pointIndex];
+              if (pointIndex === segmentStart) {
+                ctx.moveTo(x, y);
+              } else {
+                ctx.lineTo(x, y);
+              }
+            }
+            ctx.stroke();
           }
-          ctx.stroke();
           ctx.restore();
         };
 
@@ -3103,6 +3166,7 @@
         layout.xToCanvas,
         layout.yToCanvas,
       );
+      const nextSegments = computeIterationSegments(nextLogicalFrame.iterations);
       const previousDisplayedLogicalFrame = container._minimalModeDisplayedLogicalFrame ?? null;
       const previousDisplayedProjectedFrame = container._minimalModeDisplayedProjectedFrame ?? null;
       const previousDisplayedLayout = container._minimalModeDisplayedLayout ?? null;
@@ -3117,7 +3181,15 @@
         && animate;
 
       if (!shouldAnimate) {
-        drawMinimalModeFrame(ctx, width, height, layout, themeColors, nextProjectedFrame);
+        drawMinimalModeFrame(
+          ctx,
+          width,
+          height,
+          layout,
+          themeColors,
+          nextProjectedFrame,
+          nextSegments,
+        );
         container._minimalModeLogicalFrame = nextLogicalFrame;
         container._minimalModeLayout = layout;
         container._minimalModeDisplayedLogicalFrame = nextLogicalFrame;
@@ -3133,6 +3205,7 @@
         previousDisplayedLayout,
         themeColors,
         previousDisplayedProjectedFrame,
+        nextSegments,
       );
       const durationMs = minimalModeAnimationDurationMs;
       const animationStartedAtMs = performance.now();
@@ -3192,7 +3265,15 @@
             );
         }
 
-        drawMinimalModeFrame(ctx, width, height, animatedLayout, themeColors, interpolatedFrame);
+        drawMinimalModeFrame(
+          ctx,
+          width,
+          height,
+          animatedLayout,
+          themeColors,
+          interpolatedFrame,
+          nextSegments,
+        );
         container._minimalModeDisplayedProjectedFrame = interpolatedFrame;
         container._minimalModeDisplayedLogicalFrame = {
           iterations: nextLogicalFrame.iterations,
@@ -3348,23 +3429,29 @@
           return;
         }
 
+        const segments = computeIterationSegments(logicalFrame.iterations);
         ctx.save();
         ctx.strokeStyle = strokeStyle;
         ctx.lineWidth = lineWidth;
         ctx.lineJoin = "round";
         ctx.lineCap = "round";
         ctx.globalAlpha = alpha;
-        ctx.beginPath();
-        for (let pointIndex = 0; pointIndex < projectedFrame.x.length; pointIndex += 1) {
-          const x = projectedFrame.x[pointIndex];
-          const y = ySeries[pointIndex];
-          if (pointIndex === 0) {
-            ctx.moveTo(x, y);
-          } else {
-            ctx.lineTo(x, y);
+        for (const [segmentStart, segmentEnd] of segments) {
+          if (segmentEnd - segmentStart < 2) {
+            continue;
           }
+          ctx.beginPath();
+          for (let pointIndex = segmentStart; pointIndex < segmentEnd; pointIndex += 1) {
+            const x = projectedFrame.x[pointIndex];
+            const y = ySeries[pointIndex];
+            if (pointIndex === segmentStart) {
+              ctx.moveTo(x, y);
+            } else {
+              ctx.lineTo(x, y);
+            }
+          }
+          ctx.stroke();
         }
-        ctx.stroke();
         ctx.restore();
       };
 
