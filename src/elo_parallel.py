@@ -2,7 +2,6 @@
 Entirely vibe-coded file (gpt-5.4 xhigh reasoning).
 """
 
-from collections import OrderedDict
 from concurrent.futures.process import BrokenProcessPool
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from multiprocessing import get_context
@@ -16,12 +15,9 @@ from .Env import Env
 from .MCTS import MCTS
 from .models import LegacyPVModel, PVModel
 
-_WORKER_MODEL_CACHE = {}
-_WORKER_EVAL_CACHE = {}
 _WORKER_NUM_SIMULATIONS = None
 _WORKER_C_PUCT = None
 _WORKER_TEMPERATURE = None
-_WORKER_EVAL_CACHE_MAX_ENTRIES_PER_MODEL = 20_000
 _LEGACY_ANCHOR_DIR = (Path(__file__).resolve().parent.parent / "anchors" / "legacy_pv_model").resolve()
 
 
@@ -29,28 +25,8 @@ class FightPoolError(RuntimeError):
     pass
 
 
-class _BoundedEvalCache(OrderedDict):
-
-    def __init__(self, max_entries: int):
-        super().__init__()
-        self.max_entries = max(1, int(max_entries))
-
-    def get(self, key, default=None):
-        if key in self:
-            self.move_to_end(key)
-            return super().get(key)
-        return default
-
-    def __setitem__(self, key, value):
-        if key in self:
-            self.move_to_end(key)
-        super().__setitem__(key, value)
-        while len(self) > self.max_entries:
-            self.popitem(last=False)
-
-
 def _init_fight_worker(num_simulations: int, c_puct: float, temperature: float):
-    global _WORKER_MODEL_CACHE, _WORKER_EVAL_CACHE, _WORKER_NUM_SIMULATIONS, _WORKER_C_PUCT, _WORKER_TEMPERATURE
+    global _WORKER_NUM_SIMULATIONS, _WORKER_C_PUCT, _WORKER_TEMPERATURE
 
     torch.set_num_threads(1)
     try:
@@ -58,40 +34,26 @@ def _init_fight_worker(num_simulations: int, c_puct: float, temperature: float):
     except RuntimeError:
         pass
 
-    _WORKER_MODEL_CACHE = {}
-    _WORKER_EVAL_CACHE = {}
     _WORKER_NUM_SIMULATIONS = num_simulations
     _WORKER_C_PUCT = c_puct
     _WORKER_TEMPERATURE = temperature
 
 
-def _get_cached_model(model_path: str):
-    model = _WORKER_MODEL_CACHE.get(model_path)
-    if model is None:
-        checkpoint = torch.load(model_path, map_location="cpu")
-        resolved_model_path = Path(model_path).resolve()
-        if resolved_model_path.parent == _LEGACY_ANCHOR_DIR:
-            model = LegacyPVModel()
-        else:
-            model = PVModel()
-        model.load_state_dict(checkpoint["model_state_dict"])
-        model.eval()
-        _WORKER_MODEL_CACHE[model_path] = model
+def _load_model(model_path: str):
+    checkpoint = torch.load(model_path, map_location="cpu")
+    resolved_model_path = Path(model_path).resolve()
+    if resolved_model_path.parent == _LEGACY_ANCHOR_DIR:
+        model = LegacyPVModel()
+    else:
+        model = PVModel()
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.eval()
     return model
 
 
 def _fight_worker(model_path_1: str, model_path_2: str):
-    model1 = _get_cached_model(model_path_1)
-    model2 = _get_cached_model(model_path_2)
-
-    _WORKER_EVAL_CACHE.setdefault(
-        model_path_1,
-        _BoundedEvalCache(_WORKER_EVAL_CACHE_MAX_ENTRIES_PER_MODEL),
-    )
-    _WORKER_EVAL_CACHE.setdefault(
-        model_path_2,
-        _BoundedEvalCache(_WORKER_EVAL_CACHE_MAX_ENTRIES_PER_MODEL),
-    )
+    model1 = _load_model(model_path_1)
+    model2 = _load_model(model_path_2)
 
     env = Env()
     mcts1 = MCTS(
@@ -99,16 +61,12 @@ def _fight_worker(model_path_1: str, model_path_2: str):
         num_simulations=_WORKER_NUM_SIMULATIONS,
         c_puct=_WORKER_C_PUCT,
         add_exploration_noise=False,
-        eval_cache=_WORKER_EVAL_CACHE,
-        model_cache_key=model_path_1,
     )
     mcts2 = MCTS(
         model2,
         num_simulations=_WORKER_NUM_SIMULATIONS,
         c_puct=_WORKER_C_PUCT,
         add_exploration_noise=False,
-        eval_cache=_WORKER_EVAL_CACHE,
-        model_cache_key=model_path_2,
     )
     root1 = None
     root2 = None

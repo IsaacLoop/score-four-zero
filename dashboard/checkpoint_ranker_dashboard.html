@@ -2359,7 +2359,7 @@
 
     function buildMinimalModeComponents(snapshot, forcedPointCount = null) {
       const iterations = snapshot?.model_iterations ?? [];
-      const elos = snapshot?.elos ?? [];
+      const elos = getEffectiveEloSeries(snapshot);
       const fightCounts = snapshot?.fight_counts ?? [];
       const recentAvgElos = snapshot?.recent_avg_elo_last_100 ?? [];
       const reducedSeries = buildMinimalModeSeries(
