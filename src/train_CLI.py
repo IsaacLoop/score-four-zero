@@ -194,7 +194,6 @@ def train(
 
     existing_checkpoint_paths = sorted_iteration_checkpoint_paths(CHECKPOINT_DIR)
     start_iteration = 0
-    saved_checkpoint_paths = list(existing_checkpoint_paths)
     latest_checkpoint_path = None
     latest_optimizer_path = None
     if resume and existing_checkpoint_paths:
@@ -421,15 +420,19 @@ def train(
             )
 
             # Evaluating
+            previous_evaluation_checkpoint_path = (
+                CHECKPOINT_DIR / f"iteration_{iteration - EVAL_CHECKPOINT_GAP}.pt"
+            )
             should_evaluate = (
                 not skip_evaluation
                 and iteration % EVAL_EVERY_ITERATIONS == 0
-                and len(saved_checkpoint_paths) >= EVAL_CHECKPOINT_GAP
+                and iteration >= EVAL_CHECKPOINT_GAP
+                and previous_evaluation_checkpoint_path.exists()
             )
             if should_evaluate:
                 try:
                     winrate = previous_checkpoint_winrate(
-                        saved_checkpoint_paths[-EVAL_CHECKPOINT_GAP],
+                        previous_evaluation_checkpoint_path,
                         checkpoint_path,
                         num_simulations=NUM_SIMULATIONS_TRAINING,
                         max_workers=EVALUATION_WORKERS,
@@ -445,8 +448,6 @@ def train(
                         float(winrate),
                         iteration,
                     )
-
-            saved_checkpoint_paths.append(checkpoint_path)
 
     final_checkpoint_step = NUM_ITERATIONS
     final_checkpoint_path = CHECKPOINT_DIR / f"iteration_{final_checkpoint_step}.pt"
