@@ -23,6 +23,7 @@ class PVModel(AbstractPVModel):
             torch.nn.ReLU(),
             
             torch.nn.Flatten(),
+            # Note to myself: 92% of all trainable parameters are there. Should be improved in run-3!
             torch.nn.Linear(96 * BOARD_SIZE**3, 384),
             torch.nn.BatchNorm1d(384),
             torch.nn.ReLU(),
