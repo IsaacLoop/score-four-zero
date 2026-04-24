@@ -5,7 +5,6 @@ One central GPU evaluator owns the model and micro-batches leaf inference.
 
 import math
 import queue
-import time
 import traceback
 from multiprocessing import get_context
 
@@ -109,11 +108,9 @@ class SelfPlayWorker:
             cpu_model.load_state_dict(cpu_model_state_dict)
             cpu_model.eval()
             self.cpu_evaluator = _DirectCpuEvaluator(cpu_model)
-        self.cpu_search_backprop_s = 0.0
 
     def run(self):
         examples = []
-        games_completed = 0
         live_games = []
 
         while self.initial_game_indices and len(live_games) < self.live_games:
@@ -154,7 +151,6 @@ class SelfPlayWorker:
                     for x, pi, player in live_game.trajectory:
                         z = live_game.env.terminal_value(perspective_player=player)
                         examples.append((x, pi, z))
-                    games_completed += 1
 
                     replacement_live_game = self._start_live_game_from_queue()
                     if replacement_live_game is not None:
@@ -172,15 +168,6 @@ class SelfPlayWorker:
             {
                 "worker_id": self.worker_id,
                 "examples": examples,
-                "stats": {
-                    "cpu_search_backprop_s": float(self.cpu_search_backprop_s),
-                    "evaluator_wait_s": float(self.gpu_evaluator.get_stats()["wait_s"]),
-                    "evaluator_requests": int(
-                        self.gpu_evaluator.get_stats()["requests"]
-                    ),
-                    "games": int(games_completed),
-                    "examples": int(len(examples)),
-                },
             }
         )
 
@@ -248,11 +235,6 @@ class SelfPlayWorker:
             while pending_node["applied_actions"]:
                 pending_node["env"].undo_action(pending_node["applied_actions"].pop())
 
-            if backpropagate:
-                self.cpu_search_backprop_s += (
-                    time.perf_counter() - pending_node["cpu_started_at"]
-                )
-
     def _run_batched_mcts(self, live_games):
         root_expansions = []
         for live_game in live_games:
@@ -287,7 +269,6 @@ class SelfPlayWorker:
                 node = live_game.root
                 path = [node]
                 applied_actions = []
-                cpu_started_at = time.perf_counter()
 
                 while node.is_expanded and len(node.children) > 0:
                     action, child = self.mcts_helper._select_child(node)
@@ -304,7 +285,6 @@ class SelfPlayWorker:
                     self.mcts_helper._backpropagate(path, value)
                     while applied_actions:
                         live_game.env.undo_action(applied_actions.pop())
-                    self.cpu_search_backprop_s += time.perf_counter() - cpu_started_at
                 else:
                     pending_nodes.append(
                         {
@@ -312,7 +292,6 @@ class SelfPlayWorker:
                             "env": live_game.env,
                             "path": path,
                             "applied_actions": applied_actions,
-                            "cpu_started_at": cpu_started_at,
                         }
                     )
 
@@ -474,7 +453,6 @@ class ParallelSelfPlayPool:
         for game_index in range(initial_game_count, total_games):
             game_index_queue.put(game_index)
 
-        self_play_started_at = time.perf_counter()
         evaluator = GpuBatchEvaluator(
             model=model,
             request_queue=request_queue,
@@ -517,7 +495,6 @@ class ParallelSelfPlayPool:
 
             examples = []
             completed_workers = 0
-            worker_stats = []
 
             with tqdm(
                 total=total_games,
@@ -550,7 +527,6 @@ class ParallelSelfPlayPool:
                         raise RuntimeError(worker_result["error"])
 
                     examples.extend(worker_result["examples"])
-                    worker_stats.append(worker_result["stats"])
                     completed_workers += 1
 
                 progress_delta = 0

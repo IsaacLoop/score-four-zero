@@ -27,11 +27,6 @@ class GpuBatchEvaluator:
         self.max_wait_s = float(max_wait_s)
         self.device = next(model.parameters()).device
         self._thread = None
-        self._stats_lock = threading.Lock()
-        self.total_queue_wait_s = 0.0
-        self.total_forward_time_s = 0.0
-        self.total_states = 0
-        self.total_batches = 0
 
     def start(self):
         if self._thread is not None:
@@ -60,15 +55,6 @@ class GpuBatchEvaluator:
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
 
-    def get_stats(self):
-        with self._stats_lock:
-            return {
-                "queue_wait_s": float(self.total_queue_wait_s),
-                "forward_s": float(self.total_forward_time_s),
-                "states": int(self.total_states),
-                "batches": int(self.total_batches),
-            }
-
     def _run(self):
         deferred_request = None
         stop_requested = False
@@ -79,7 +65,7 @@ class GpuBatchEvaluator:
 
             if deferred_request is not None:
                 pending_requests.append(deferred_request)
-                pending_state_count = len(deferred_request[2])
+                pending_state_count = len(deferred_request[1])
                 deferred_request = None
 
             if not pending_requests:
@@ -87,7 +73,7 @@ class GpuBatchEvaluator:
                 if request is None:
                     break
                 pending_requests.append(request)
-                pending_state_count = len(request[2])
+                pending_state_count = len(request[1])
 
             deadline = time.perf_counter() + self.max_wait_s
 
@@ -105,7 +91,7 @@ class GpuBatchEvaluator:
                     stop_requested = True
                     break
 
-                request_state_count = len(request[2])
+                request_state_count = len(request[1])
                 if (
                     pending_requests
                     and pending_state_count + request_state_count > self.max_batch_size
@@ -116,9 +102,8 @@ class GpuBatchEvaluator:
                 pending_requests.append(request)
                 pending_state_count += request_state_count
 
-            batch_started_at = time.perf_counter()
             x_batch = np.concatenate(
-                [request_x_batch for _, _, request_x_batch in pending_requests],
+                [request_x_batch for _, request_x_batch in pending_requests],
                 axis=0,
             )
             x_batch = torch.as_tensor(
@@ -127,29 +112,14 @@ class GpuBatchEvaluator:
                 device=self.device,
             )
 
-            if self.device.type == "cuda":
-                torch.cuda.synchronize(self.device)
-            forward_started_at = time.perf_counter()
             with torch.inference_mode():
                 policy_logits_batch, value_batch = self.model(x_batch)
-            if self.device.type == "cuda":
-                torch.cuda.synchronize(self.device)
-            forward_elapsed_s = time.perf_counter() - forward_started_at
 
             policy_logits_batch = policy_logits_batch.detach().cpu().numpy()
             value_batch = value_batch.squeeze(-1).detach().cpu().numpy()
 
-            with self._stats_lock:
-                self.total_forward_time_s += forward_elapsed_s
-                self.total_states += int(len(x_batch))
-                self.total_batches += 1
-                for _, request_enqueued_at, request_x_batch in pending_requests:
-                    self.total_queue_wait_s += (
-                        batch_started_at - request_enqueued_at
-                    ) * len(request_x_batch)
-
             batch_offset = 0
-            for worker_id, _, request_x_batch in pending_requests:
+            for worker_id, request_x_batch in pending_requests:
                 request_state_count = len(request_x_batch)
                 self.response_queues[worker_id].put(
                     (
@@ -177,23 +147,9 @@ class GpuBatchEvaluatorClient:
         self.worker_id = int(worker_id)
         self.request_queue = request_queue
         self.response_queue = response_queue
-        self.total_wait_s = 0.0
-        self.total_requests = 0
-        self.total_states = 0
 
     def evaluate(self, x_batch):
         x_batch = np.ascontiguousarray(x_batch, dtype=np.float32)
-        request_started_at = time.perf_counter()
-        self.request_queue.put((self.worker_id, request_started_at, x_batch))
+        self.request_queue.put((self.worker_id, x_batch))
         policy_logits_batch, value_batch = self.response_queue.get()
-        self.total_wait_s += time.perf_counter() - request_started_at
-        self.total_requests += 1
-        self.total_states += len(x_batch)
         return policy_logits_batch, value_batch
-
-    def get_stats(self):
-        return {
-            "wait_s": float(self.total_wait_s),
-            "requests": int(self.total_requests),
-            "states": int(self.total_states),
-        }
